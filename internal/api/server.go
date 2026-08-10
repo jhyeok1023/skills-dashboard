@@ -39,6 +39,11 @@ type Service struct {
 	// CredentialError, when set, is why AWS is unreachable. Handlers report it
 	// instead of failing opaquely, so the settings page can explain what to fix.
 	CredentialError error
+
+	// ConfigNotices is what loading the stored config had to change. A value
+	// the loader discarded leaves a panel empty, and an empty panel with no
+	// explanation is indistinguishable from a resource with no traffic.
+	ConfigNotices []string
 }
 
 func (s *Service) now() time.Time {
@@ -196,6 +201,10 @@ type metaResponse struct {
 	Ranges          []metaRangeEntry `json:"ranges"`
 	DefaultRange    string           `json:"defaultRange"`
 	Limits          config.Limits    `json:"limits"`
+	// Notices ride here rather than on /api/config because the settings page
+	// sends the config object it was given straight back on save, and the PUT
+	// handler rejects unknown fields.
+	Notices []string `json:"notices,omitempty"`
 }
 
 type metaRangeEntry struct {
@@ -210,6 +219,7 @@ func (s *Service) handleMeta(w http.ResponseWriter, _ *http.Request) {
 		MaxRangeSeconds: int(domain.MaxRange.Seconds()),
 		DefaultRange:    domain.Range1h.String(),
 		Limits:          s.Store.Get().Limits,
+		Notices:         s.ConfigNotices,
 	}
 	for _, r := range domain.Ranges() {
 		entry := metaRangeEntry{

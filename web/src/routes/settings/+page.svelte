@@ -14,6 +14,12 @@
 	let config = $state<Config | null>(null);
 	let identity = $state<Identity | null>(null);
 	let credentialProblem = $state('');
+	/**
+	 * What loading the stored config had to discard. A dropped value leaves a
+	 * panel empty, and an empty panel says nothing about why — so it is said
+	 * here, beside the fields that have to be filled in again.
+	 */
+	let configNotices = $state<string[]>([]);
 	let saving = $state(false);
 	let saved = $state(false);
 	let saveError = $state('');
@@ -35,6 +41,10 @@
 			.identity()
 			.then((id) => (identity = id))
 			.catch((e) => (credentialProblem = e?.hint || e?.message || String(e)));
+		api
+			.meta()
+			.then((m) => (configNotices = m.notices ?? []))
+			.catch(() => {});
 	});
 
 	async function discover(kind: string, prefix = '') {
@@ -133,6 +143,19 @@ AWS_REGION=ap-northeast-2</pre>
 		<!-- Resources -->
 		<section class="card stack">
 			<h2 data-value>모니터링 대상</h2>
+
+			{#if configNotices.length}
+				<div class="notices stack" data-testid="config-notices">
+					<p class="warning tiny" data-value>
+						설정 파일에서 쓸 수 없는 값을 발견해 지운 뒤 시작했습니다. 아래에서 다시 선택하세요.
+					</p>
+					<ul class="tiny">
+						{#each configNotices as note (note)}
+							<li data-value>{note}</li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
 
 			<div class="field">
 				<label for="cluster">EKS 클러스터</label>
@@ -550,6 +573,16 @@ AWS_REGION=ap-northeast-2</pre>
 		font-weight: 400;
 		font-size: 13px;
 		color: var(--label-primary);
+	}
+
+	/* One line per discarded value, indented under the sentence that explains
+	   why they were discarded. */
+	.notices ul {
+		margin: 0;
+		padding-left: 18px;
+		color: var(--label-secondary);
+		display: grid;
+		gap: 3px;
 	}
 
 	.chips {

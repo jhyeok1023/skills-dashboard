@@ -383,7 +383,10 @@ const meta = {
 		insightsConcurrency: 6,
 		queryTimeoutSeconds: 45,
 		cacheTtlSeconds: 30
-	}
+	},
+	// The dashboard starts on a repaired config rather than refusing to boot,
+	// so the settings page has to account for the value that went missing.
+	notices: ['loadBalancer "my-alb"는 CloudWatch 차원 값이 아닙니다 → 이 값을 비웠습니다.']
 };
 
 const identity = {

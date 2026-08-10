@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -27,9 +28,27 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("fatal", "error", err)
+		reportFatal(err)
 		os.Exit(1)
 	}
+}
+
+// reportFatal says why the dashboard is not running, in a way that survives the
+// way it was started.
+//
+// Double-clicked in Explorer, the process gets a console of its own and Windows
+// tears the window down with the process — so the reason scrolls past and
+// disappears, and the dashboard looks like it simply refuses to open. When this
+// process is the console's only occupant, the message waits for a keypress.
+// Started from a terminal, nothing is held: the text is already on screen and
+// the shell prompt should come straight back.
+func reportFatal(err error) {
+	fmt.Fprintf(os.Stderr, "\n대시보드를 시작하지 못했습니다.\n\n  %v\n\n", err)
+	if !ownsConsole() {
+		return
+	}
+	fmt.Fprintln(os.Stderr, "엔터를 누르면 창이 닫힙니다.")
+	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 }
 
 func run() error {
@@ -55,13 +74,21 @@ func run() error {
 	}
 	store, err := config.NewStore(cfgPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("read the config at %s: %w", cfgPath, err)
 	}
 	cfg := store.Get()
 
+	// Anything the stored config had to give up is said twice: here for whoever
+	// is watching a terminal, and through /api/meta for the settings page,
+	// which is where the value has to be chosen again.
+	for _, note := range store.Notices() {
+		logger.Warn("config was repaired on load", "detail", note, "file", cfgPath)
+	}
+
 	svc := &api.Service{
-		Store:  store,
-		Logger: logger,
+		Store:         store,
+		Logger:        logger,
+		ConfigNotices: store.Notices(),
 		Cache: &awsx.Cache{
 			TTL:      time.Duration(cfg.Limits.CacheTTLSeconds) * time.Second,
 			ErrorTTL: 5 * time.Second,
@@ -138,7 +165,12 @@ func run() error {
 	mux.Handle("/api/", svc.Handler())
 	mux.Handle("/", web.Handler())
 
-	listenAddr := net.JoinHostPort(*addr, fmt.Sprint(*port))
+	ln, err := listen(*addr, *port, portWasChosen(), logger)
+	if err != nil {
+		return err
+	}
+
+	listenAddr := ln.Addr().String()
 	srv := &http.Server{
 		Addr:    listenAddr,
 		Handler: mux,
@@ -150,11 +182,6 @@ func run() error {
 		WriteTimeout:      120 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
-	}
-
-	ln, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", listenAddr, err)
 	}
 
 	url := fmt.Sprintf("http://%s", listenAddr)
@@ -182,6 +209,55 @@ func run() error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+// portFallbacks is how many ports past the default are tried before giving up.
+const portFallbacks = 5
+
+// portWasChosen reports whether -port was given on the command line, as opposed
+// to being left at its default.
+func portWasChosen() bool {
+	chosen := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "port" {
+			chosen = true
+		}
+	})
+	return chosen
+}
+
+// listen binds the dashboard's socket.
+//
+// A port already in use used to end the process, and on Windows that means a
+// double-clicked console window vanishes with the reason inside it. So the
+// default port is only a starting point: the next few are tried and the one
+// that worked is logged. A port the operator named explicitly is honoured — if
+// they said 8080 they want 8080 — and the failure says what to do about it.
+func listen(addr string, port int, chosen bool, logger *slog.Logger) (net.Listener, error) {
+	last := port
+	if !chosen {
+		last = port + portFallbacks
+	}
+	for p := port; p <= last; p++ {
+		ln, err := net.Listen("tcp", net.JoinHostPort(addr, fmt.Sprint(p)))
+		if err == nil {
+			if p != port {
+				logger.Warn("the requested port was busy; using the next free one",
+					"requested", port, "using", p)
+			}
+			return ln, nil
+		}
+		if p == last {
+			if chosen {
+				return nil, fmt.Errorf(
+					"%d 포트를 열 수 없습니다 (%v). 이미 사용 중이라면 --port 로 다른 포트를 지정하세요", p, err)
+			}
+			return nil, fmt.Errorf(
+				"%d..%d 포트가 모두 사용 중입니다 (%v). --port 로 다른 포트를 지정하세요", port, last, err)
+		}
+	}
+	// Unreachable: the loop always returns on its last iteration.
+	return nil, fmt.Errorf("listen on %s", addr)
 }
 
 // openBrowser is best effort. Failing to open a browser is not a reason to

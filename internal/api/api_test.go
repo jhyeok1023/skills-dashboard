@@ -696,6 +696,35 @@ func TestMetaNeverOffersACombinationTheServerRejects(t *testing.T) {
 	}
 }
 
+// A value the loader discarded leaves a panel empty, and an empty panel looks
+// exactly like a resource with no traffic. The notice is how the settings page
+// gets to say which field went missing and why.
+func TestConfigNoticesReachTheSettingsPage(t *testing.T) {
+	svc, h := newTestService(t)
+	svc.ConfigNotices = []string{`loadBalancer "my-alb"는 ... → 이 값을 비웠습니다.`}
+	h = svc.Handler()
+
+	rec := get(t, h, "/api/meta")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	var meta metaResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if len(meta.Notices) != 1 || !strings.Contains(meta.Notices[0], "my-alb") {
+		t.Errorf("notices = %v, want the discarded value explained", meta.Notices)
+	}
+
+	// They ride on meta rather than on the config, because the settings page
+	// sends the config object back verbatim on save and the PUT handler
+	// rejects unknown fields.
+	cfgRec := get(t, h, "/api/config")
+	if strings.Contains(cfgRec.Body.String(), "notices") {
+		t.Error("notices leaked into the config payload, which is round-tripped on save")
+	}
+}
+
 func TestUnknownPanelAndPageAreRejected(t *testing.T) {
 	_, h := newTestService(t)
 	if rec := get(t, h, "/api/panel/nope"); rec.Code != http.StatusBadRequest {

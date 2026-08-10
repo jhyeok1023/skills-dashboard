@@ -308,6 +308,17 @@ test('the load balancer is offered as a dimension, not an ARN', async ({ page })
 	await expect(lb).toHaveValue('app/my-alb/50dc6c495c0c9188');
 });
 
+// A repaired config starts the dashboard but leaves a field blank. An empty
+// field with no explanation is the same as a resource that has no traffic.
+test('a value dropped from the stored config is explained on the settings page', async ({
+	page
+}) => {
+	await open(page, '/settings');
+	const notices = page.getByTestId('config-notices');
+	await expect(notices).toBeVisible();
+	await expect(notices).toContainText('my-alb');
+});
+
 // The two regions are set outside the UI, so an operator staring at an empty
 // WAF panel needs to see which region the dashboard actually queried.
 test('both regions are reported on the settings page', async ({ page }) => {

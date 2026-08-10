@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -94,15 +95,112 @@ func (c Config) PodLogGroupOrDefault() string {
 }
 
 // Validate fills in defaults for anything unset and reports what is unusable.
+// It is the save path: a person is looking at the settings page, so refusing
+// the write and saying why is the feedback they came for.
 func (c *Config) Validate() error {
-	if c.Region == "" {
-		return fmt.Errorf("region is not set")
+	ps := c.inspect()
+	if len(ps) == 0 {
+		return nil
 	}
+	msgs := make([]string, 0, len(ps))
+	for _, p := range ps {
+		msgs = append(msgs, p.msg)
+	}
+	return errors.New(strings.Join(msgs, "; "))
+}
+
+// Repair fills in defaults, discards whatever is left unusable, and returns a
+// line about each thing it discarded.
+//
+// It is the load path, and it deliberately does not fail. A stored value that
+// Validate would refuse — one an older build accepted, or a hand-edited file —
+// must not keep the dashboard from starting: the settings page is the only
+// place to fix it, and it cannot be reached from a process that exited. This is
+// the same bargain the credentials already make in cmd/skills-dashboard.
+func (c *Config) Repair() []string {
+	ps := c.inspect()
+	notes := make([]string, 0, len(ps))
+	for _, p := range ps {
+		p.drop(c)
+		notes = append(notes, p.msg+" → "+p.dropped)
+	}
+	return notes
+}
+
+// problem is one thing a config cannot be used with, together with how to make
+// it usable without that thing.
+//
+// Both paths read this one list, so the rule the settings page enforces and the
+// rule the loader applies cannot drift apart.
+type problem struct {
+	// msg says what is wrong. It is the error text on the save path.
+	msg string
+	// dropped says what was done about it. It is appended on the load path.
+	dropped string
+	drop    func(*Config)
+}
+
+// inspect fills in defaults and returns what is still unusable.
+func (c *Config) inspect() []problem {
+	c.fillDefaults()
+
+	var out []problem
+	if c.Region == "" {
+		out = append(out, problem{
+			msg:     "region이 설정되지 않았습니다",
+			dropped: "기본 리전 " + Default().Region + " 을 사용합니다.",
+			drop:    func(c *Config) { c.Region = Default().Region },
+		})
+	}
+	if c.LoadBalancer != "" && !albDimensionRe.MatchString(c.LoadBalancer) {
+		out = append(out, problem{
+			msg: fmt.Sprintf(
+				"loadBalancer %q는 CloudWatch 차원 값이 아닙니다. app/<이름>/<ID> 형식이어야 합니다 "+
+					"(예: app/my-alb/50dc6c495c0c9188). 전체 ARN을 붙여넣어도 됩니다",
+				c.LoadBalancer),
+			dropped: "이 값을 비웠습니다. 설정에서 다시 선택하세요.",
+			drop:    func(c *Config) { c.LoadBalancer = "" },
+		})
+	}
+	if err := c.LogFormat.Validate(); err != nil {
+		out = append(out, problem{
+			msg:     fmt.Sprintf("logFormat: %v", err),
+			dropped: "로그 형식을 기본값으로 되돌렸습니다.",
+			drop:    func(c *Config) { c.LogFormat = domain.DefaultLogFormat() },
+		})
+	}
+	// Only the headers that cannot be embedded are dropped; the rest of the
+	// list is a working selection and survives.
+	var badHeaders []string
+	for _, h := range c.WAFHeaders {
+		if _, err := (domain.WAFQueries{}).ByHeader(h, 1); err != nil {
+			badHeaders = append(badHeaders, h)
+		}
+	}
+	if len(badHeaders) > 0 {
+		out = append(out, problem{
+			msg:     fmt.Sprintf("wafHeaders: %s 는 쿼리에 넣을 수 없는 헤더 이름입니다", strings.Join(badHeaders, ", ")),
+			dropped: "해당 헤더를 목록에서 제외했습니다.",
+			drop: func(c *Config) {
+				kept := c.WAFHeaders[:0]
+				for _, h := range c.WAFHeaders {
+					if _, err := (domain.WAFQueries{}).ByHeader(h, 1); err == nil {
+						kept = append(kept, h)
+					}
+				}
+				c.WAFHeaders = kept
+			},
+		})
+	}
+	return out
+}
+
+// fillDefaults supplies everything that was left unset and converts what can be
+// converted. Nothing here can fail — a conversion that does not produce a
+// usable value is reported by inspect instead.
+func (c *Config) fillDefaults() {
 	if c.WAFRegion == "" {
 		c.WAFRegion = "us-east-1"
-	}
-	if err := c.normaliseDimensions(); err != nil {
-		return err
 	}
 	if c.Limits.LogRows <= 0 {
 		c.Limits.LogRows = DefaultLimits().LogRows
@@ -128,15 +226,7 @@ func (c *Config) Validate() error {
 	for i, p := range c.LogFormat.ExcludePaths {
 		c.LogFormat.ExcludePaths[i] = strings.TrimSpace(p)
 	}
-	if err := c.LogFormat.Validate(); err != nil {
-		return fmt.Errorf("logFormat: %w", err)
-	}
-	for _, h := range c.WAFHeaders {
-		if _, err := (domain.WAFQueries{}).ByHeader(h, 1); err != nil {
-			return fmt.Errorf("wafHeaders: %w", err)
-		}
-	}
-	return nil
+	c.normaliseDimensions()
 }
 
 // albDimensionRe is the shape CloudWatch gives an Application Load Balancer:
@@ -145,27 +235,19 @@ func (c *Config) Validate() error {
 var albDimensionRe = regexp.MustCompile(`^app/[^/]+/[0-9a-fA-F]+$`)
 
 // normaliseDimensions converts the load balancer and target group entries into
-// the form CloudWatch expects, then rejects a load balancer that still is not
-// in it.
+// the form CloudWatch expects.
 //
 // Both fields hold a CloudWatch dimension value rather than an ARN, and the
 // SEARCH value regex (domain.searchValueRe) accepts ':' and '/' — so an ARN
 // pasted here passes every check and then matches no metric at all. The panel
 // renders empty with no warning, which reads as "this load balancer had no
-// traffic". Converting what we can and refusing the rest turns that silence
-// into a message at the moment of saving.
-func (c *Config) normaliseDimensions() error {
+// traffic". Converting what can be converted is how that silence is avoided;
+// what the conversion cannot rescue is left for inspect to report.
+func (c *Config) normaliseDimensions() {
 	c.LoadBalancer = domain.LoadBalancerDimension(strings.TrimSpace(c.LoadBalancer))
-	if c.LoadBalancer != "" && !albDimensionRe.MatchString(c.LoadBalancer) {
-		return fmt.Errorf(
-			"loadBalancer %q는 CloudWatch 차원 값이 아닙니다. app/<이름>/<ID> 형식이어야 합니다 "+
-				"(예: app/my-alb/50dc6c495c0c9188). 전체 ARN을 붙여넣어도 됩니다",
-			c.LoadBalancer)
-	}
 	for i, tg := range c.TargetGroups {
 		c.TargetGroups[i] = domain.TargetGroupDimension(strings.TrimSpace(tg))
 	}
-	return nil
 }
 
 // Dir is where the config file lives.
@@ -192,10 +274,20 @@ type Store struct {
 	mu   sync.RWMutex
 	cfg  Config
 	path string
+
+	// notices records what loading the file had to change. It is fixed at
+	// construction, so it needs no lock.
+	notices []string
 }
 
 // NewStore loads the config at path, falling back to defaults when the file
 // does not exist yet.
+//
+// Nothing about the file's *contents* is fatal. A value an older build accepted
+// but this one will not, or a file someone edited into invalid JSON, must not
+// stop the dashboard from starting — the settings page is where such a thing
+// gets fixed, and a process that exited serves no settings page. Only being
+// unable to read the file at all is reported as an error.
 func NewStore(path string) (*Store, error) {
 	s := &Store{path: path, cfg: Default()}
 	b, err := os.ReadFile(path)
@@ -208,13 +300,34 @@ func NewStore(path string) (*Store, error) {
 
 	cfg := Default()
 	if err := json.Unmarshal(b, &cfg); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		s.notices = append(s.notices,
+			fmt.Sprintf("설정 파일을 읽을 수 없어 기본값으로 시작했습니다 (%v).", err))
+		// Starting from defaults means the next save overwrites the file, so
+		// the original is moved aside rather than left to be lost.
+		if bak, err := keepAside(path); err == nil {
+			s.notices = append(s.notices, "원본은 "+bak+" 에 두었습니다.")
+		}
+		return s, nil
 	}
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
+	s.notices = append(s.notices, cfg.Repair()...)
 	s.cfg = cfg
 	return s, nil
+}
+
+// keepAside renames a file that could not be understood, returning where it
+// went.
+func keepAside(path string) (string, error) {
+	bak := path + ".bak"
+	if err := os.Rename(path, bak); err != nil {
+		return "", err
+	}
+	return bak, nil
+}
+
+// Notices is what loading the config had to change, in words meant for the
+// settings page. Empty when the file was already usable.
+func (s *Store) Notices() []string {
+	return append([]string(nil), s.notices...)
 }
 
 // Get returns a copy of the current config. Callers get their own slices, so a

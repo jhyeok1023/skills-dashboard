@@ -107,6 +107,8 @@ export interface Meta {
 		queryTimeoutSeconds: number;
 		cacheTtlSeconds: number;
 	};
+	/** What loading the stored config had to discard, if anything. */
+	notices?: string[];
 }
 
 export interface Identity {

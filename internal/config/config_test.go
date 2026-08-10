@@ -305,11 +305,71 @@ func TestStoreRejectsInvalidConfigWithoutPersistingIt(t *testing.T) {
 	}
 }
 
-func TestNewStoreReportsAnUnparseableFile(t *testing.T) {
+// An unparseable file must not stop the dashboard from starting. The settings
+// page is the only place to repair it, and a process that exited serves none.
+func TestNewStoreKeepsAnUnparseableFileAsideAndStarts(t *testing.T) {
 	dir := t.TempDir()
 	p := writeFile(t, dir, "config.json", "{not json")
-	if _, err := NewStore(p); err == nil {
-		t.Error("a corrupt config file was accepted")
+
+	s, err := NewStore(p)
+	if err != nil {
+		t.Fatalf("a corrupt config file stopped the dashboard from starting: %v", err)
+	}
+	if got := s.Get().Region; got != Default().Region {
+		t.Errorf("Region = %q, want the default", got)
+	}
+	if len(s.Notices()) == 0 {
+		t.Error("the file was replaced with defaults and nothing said so")
+	}
+	// Starting from defaults means the next save overwrites the file, so the
+	// original has to survive somewhere.
+	if _, err := os.Stat(p + ".bak"); err != nil {
+		t.Errorf("the unreadable original was lost: %v", err)
+	}
+}
+
+// A value an older build accepted — the load balancer field had no validation
+// at all until recently — must not turn into a dashboard that refuses to boot
+// with its reason printed to a console window that closes.
+func TestNewStoreDropsAnUnusableValueInsteadOfRefusingToStart(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "config.json", `{
+		"region": "ap-northeast-2",
+		"clusterName": "prod",
+		"loadBalancer": "my-alb",
+		"wafHeaders": ["Host", "User Agent"]
+	}`)
+
+	s, err := NewStore(p)
+	if err != nil {
+		t.Fatalf("a stored value stopped the dashboard from starting: %v", err)
+	}
+	got := s.Get()
+	if got.LoadBalancer != "" {
+		t.Errorf("LoadBalancer = %q, want it dropped", got.LoadBalancer)
+	}
+	if len(got.WAFHeaders) != 1 || got.WAFHeaders[0] != "Host" {
+		t.Errorf("WAFHeaders = %v, want only the usable one kept", got.WAFHeaders)
+	}
+	// Everything that was fine has to survive; repairing is not resetting.
+	if got.ClusterName != "prod" {
+		t.Errorf("ClusterName = %q, want it preserved", got.ClusterName)
+	}
+	if len(s.Notices()) != 2 {
+		t.Errorf("notices = %v, want one per discarded value", s.Notices())
+	}
+	for _, n := range s.Notices() {
+		if !strings.Contains(n, "→") {
+			t.Errorf("notice %q does not say what was done about it", n)
+		}
+	}
+
+	// The save path stays strict: the same value typed into the settings page
+	// is refused, because there a person is watching and can fix it.
+	bad := got
+	bad.LoadBalancer = "my-alb"
+	if err := s.Set(bad); err == nil {
+		t.Error("the settings page accepted a load balancer name")
 	}
 }
 
