@@ -274,6 +274,48 @@ test('the log format preview reports what a sample line parsed to', async ({ pag
 	await expect(preview.locator('text=503')).toBeVisible();
 });
 
+// Both log group fields used to share one discovery result, so the WAF listing
+// rendered under the pod field and picking from it overwrote the pod setting.
+test('the WAF log group is discovered into its own field', async ({ page }) => {
+	await open(page, '/settings');
+	const podLog = page.locator('#podlog');
+	const wafLog = page.locator('#waflog');
+	const podBefore = await podLog.inputValue();
+
+	await wafLog.locator('xpath=..').locator('button', { hasText: '자동 조회' }).click();
+
+	const chip = page.locator('.chip', { hasText: 'aws-waf-logs-demo' });
+	await expect(chip).toBeVisible();
+	await chip.click();
+
+	await expect(wafLog).toHaveValue('aws-waf-logs-demo');
+	await expect(podLog).toHaveValue(podBefore);
+});
+
+// The field holds a CloudWatch dimension. An ARN there passes every check and
+// then matches no metric, so the panel renders empty with nothing to explain it.
+test('the load balancer is offered as a dimension, not an ARN', async ({ page }) => {
+	await open(page, '/settings');
+	const lb = page.locator('#lb');
+	await lb.fill('');
+
+	await lb.locator('xpath=..').locator('button', { hasText: '자동 조회' }).click();
+
+	const chip = page.locator('.chip', { hasText: 'my-alb' });
+	await expect(chip).toBeVisible();
+	await chip.click();
+
+	await expect(lb).toHaveValue('app/my-alb/50dc6c495c0c9188');
+});
+
+// The two regions are set outside the UI, so an operator staring at an empty
+// WAF panel needs to see which region the dashboard actually queried.
+test('both regions are reported on the settings page', async ({ page }) => {
+	await open(page, '/settings');
+	await expect(page.locator('text=ap-northeast-2').first()).toBeVisible();
+	await expect(page.locator('text=us-east-1').first()).toBeVisible();
+});
+
 // Health-check traffic is filtered out, so the stats have to say so — a count
 // that quietly drops a slice of the traffic is worse than one that is wrong.
 test('excluded paths are stated beside the numbers and editable in settings', async ({ page }) => {

@@ -43,9 +43,53 @@ func rowFloat(row map[string]string, key string) (float64, bool) {
 	return f, true
 }
 
+// logSource is where one panel's log queries go: which runner, in which
+// region, against which group.
+//
+// The three travel together because the cache key needs all of them. Keyed on
+// the group name alone, a pod query and a WAF query against same-named groups
+// in two different regions would serve each other's rows.
+type logSource struct {
+	runner *awsx.InsightsRunner
+	region string
+	group  string
+	// missing is what to tell the operator when group is empty. Pod logs and
+	// WAF logs are configured in different places, and naming the wrong one is
+	// how an operator ends up looking at a setting that was already correct.
+	missing string
+}
+
+func (s *Service) podLogs(rc requestCtx) logSource {
+	return logSource{
+		runner:  s.Insights,
+		region:  s.region(),
+		group:   rc.cfg.PodLogGroupOrDefault(),
+		missing: "팟 로그 그룹이 설정되지 않았습니다. 설정에서 클러스터 또는 로그 그룹을 지정하세요.",
+	}
+}
+
+// wafLogs points the WAF panels at the WAF region. It falls back to the
+// primary runner when no global one was wired up, which is the shape a test
+// that assembles a Service by hand tends to leave behind.
+func (s *Service) wafLogs(rc requestCtx) logSource {
+	runner := s.InsightsGlobal
+	if runner == nil {
+		runner = s.Insights
+	}
+	region := s.wafRegion()
+	return logSource{
+		runner: runner,
+		region: region,
+		group:  rc.cfg.WAFLogGroup,
+		missing: fmt.Sprintf(
+			"WAF 로그 그룹이 설정되지 않았습니다. CLOUDFRONT 스코프 WAF는 %s에만 로그를 남기므로, 설정에서 해당 리전의 aws-waf-logs-* 그룹을 지정하세요.",
+			region),
+	}
+}
+
 // runLogQueries executes a set of queries behind the cache.
-func (s *Service) runLogQueries(rc requestCtx, logGroup, name string, qs []domain.Query) (map[string]awsx.QueryResult, map[string]error) {
-	if logGroup == "" {
+func (s *Service) runLogQueries(rc requestCtx, src logSource, name string, qs []domain.Query) (map[string]awsx.QueryResult, map[string]error) {
+	if src.group == "" {
 		errs := map[string]error{}
 		for _, q := range qs {
 			errs[q.ID] = awsx.ErrNoLogGroup
@@ -54,7 +98,8 @@ func (s *Service) runLogQueries(rc requestCtx, logGroup, name string, qs []domai
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "logs|%s|%s|%d|%d|%d", name, logGroup, rc.w.Start.Unix(), rc.w.End.Unix(), rc.w.Period.Seconds())
+	fmt.Fprintf(&b, "logs|%s|%s|%s|%d|%d|%d", name, src.region, src.group,
+		rc.w.Start.Unix(), rc.w.End.Unix(), rc.w.Period.Seconds())
 	ids := make([]string, 0, len(qs))
 	for _, q := range qs {
 		ids = append(ids, q.ID+":"+strconv.Itoa(q.Limit))
@@ -67,7 +112,7 @@ func (s *Service) runLogQueries(rc requestCtx, logGroup, name string, qs []domai
 		errs    map[string]error
 	}
 	got, err := awsx.Cached(rc.ctx, s.Cache, b.String(), func(ctx context.Context) (bundle, error) {
-		res, errs := s.Insights.RunAll(ctx, logGroup, rc.w, qs)
+		res, errs := src.runner.RunAll(ctx, src.group, rc.w, qs)
 		return bundle{res, errs}, nil
 	})
 	if err != nil {
@@ -112,7 +157,7 @@ func noteQueryCost(panel *domain.Panel, results map[string]awsx.QueryResult) {
 
 // noteQueryErrors turns per-query failures into panel warnings so a page keeps
 // rendering when one of its queries fails.
-func noteQueryErrors(panel *domain.Panel, errs map[string]error) {
+func noteQueryErrors(panel *domain.Panel, src logSource, errs map[string]error) {
 	ids := make([]string, 0, len(errs))
 	for id := range errs {
 		ids = append(ids, id)
@@ -121,10 +166,12 @@ func noteQueryErrors(panel *domain.Panel, errs map[string]error) {
 	for _, id := range ids {
 		err := errs[id]
 		if errors.Is(err, awsx.ErrNoLogGroup) {
-			panel.Warn("로그 그룹이 설정되지 않았습니다. 설정에서 클러스터 또는 로그 그룹을 지정하세요.")
+			panel.Warn("%s", src.missing)
 			return
 		}
-		panel.Warn("%s 쿼리 실패: %v", id, err)
+		// The region is named because the most common failure here is a group
+		// that exists, just not where the query went looking for it.
+		panel.Warn("%s 쿼리 실패 (%s): %v", id, src.region, err)
 	}
 }
 
@@ -136,8 +183,9 @@ func (s *Service) buildPodLatencyPanel(rc requestCtx) (*domain.Panel, error) {
 	if err != nil {
 		return nil, err
 	}
-	results, errs := s.runLogQueries(rc, rc.cfg.PodLogGroupOrDefault(), "pod-latency", []domain.Query{traffic})
-	noteQueryErrors(panel, errs)
+	src := s.podLogs(rc)
+	results, errs := s.runLogQueries(rc, src, "pod-latency", []domain.Query{traffic})
+	noteQueryErrors(panel, src, errs)
 	res, ok := results[traffic.ID]
 	if !ok {
 		return panel, nil
@@ -244,8 +292,9 @@ func (s *Service) buildPodStatusCodePanel(rc requestCtx) (*domain.Panel, error) 
 		return nil, err
 	}
 
-	results, errs := s.runLogQueries(rc, rc.cfg.PodLogGroupOrDefault(), "pod-status-codes", []domain.Query{series, list})
-	noteQueryErrors(panel, errs)
+	src := s.podLogs(rc)
+	results, errs := s.runLogQueries(rc, src, "pod-status-codes", []domain.Query{series, list})
+	noteQueryErrors(panel, src, errs)
 
 	// The aggregate is uncapped, so summing it gives the real number of
 	// non-OK responses. The list beside it is capped. Counting the list would
@@ -370,8 +419,9 @@ func (s *Service) buildPodErrorPanel(rc requestCtx) (*domain.Panel, error) {
 		return nil, err
 	}
 
-	results, errs := s.runLogQueries(rc, rc.cfg.PodLogGroupOrDefault(), "pod-errors", []domain.Query{series, list})
-	noteQueryErrors(panel, errs)
+	src := s.podLogs(rc)
+	results, errs := s.runLogQueries(rc, src, "pod-errors", []domain.Query{series, list})
+	noteQueryErrors(panel, src, errs)
 
 	n := rc.w.Buckets()
 	errSeries := domain.NewSeries("error", domain.UnitCount, domain.ColorRed, n)
@@ -443,15 +493,14 @@ func (s *Service) buildPodErrorPanel(rc requestCtx) (*domain.Panel, error) {
 	return panel, nil
 }
 
-func (s *Service) wafLogGroup(rc requestCtx) string { return rc.cfg.WAFLogGroup }
-
 func (s *Service) buildWAFTrafficPanel(rc requestCtx) (*domain.Panel, error) {
 	panel := &domain.Panel{ID: "waf-traffic", Title: "WAF 트래픽"}
 	q := domain.WAFQueries{Headers: rc.cfg.WAFHeaders}
 
 	series := q.ActionSeries(rc.w)
-	results, errs := s.runLogQueries(rc, s.wafLogGroup(rc), "waf-traffic", []domain.Query{series})
-	noteQueryErrors(panel, errs)
+	src := s.wafLogs(rc)
+	results, errs := s.runLogQueries(rc, src, "waf-traffic", []domain.Query{series})
+	noteQueryErrors(panel, src, errs)
 
 	byAction := map[string]*domain.Series{}
 	totals := map[string]float64{}
@@ -531,8 +580,9 @@ func (s *Service) buildWAFBlockedPanel(rc requestCtx) (*domain.Panel, error) {
 
 	agg := q.Blocked(rc.cfg.Limits.TopN)
 	list := q.BlockedList(limit)
-	results, errs := s.runLogQueries(rc, s.wafLogGroup(rc), "waf-blocked", []domain.Query{agg, list})
-	noteQueryErrors(panel, errs)
+	src := s.wafLogs(rc)
+	results, errs := s.runLogQueries(rc, src, "waf-blocked", []domain.Query{agg, list})
+	noteQueryErrors(panel, src, errs)
 
 	var rows []domain.Row
 	var listTotal float64
@@ -592,8 +642,9 @@ func (s *Service) buildWAFBreakdownPanel(rc requestCtx) (*domain.Panel, error) {
 		headerQueries[hq.ID] = h
 	}
 
-	results, errs := s.runLogQueries(rc, s.wafLogGroup(rc), "waf-breakdown", queries)
-	noteQueryErrors(panel, errs)
+	src := s.wafLogs(rc)
+	results, errs := s.runLogQueries(rc, src, "waf-breakdown", queries)
+	noteQueryErrors(panel, src, errs)
 
 	// The breakdowns are rendered as one table each; the panel carries the
 	// method breakdown and reports the others as separate rows so every value

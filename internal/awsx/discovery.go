@@ -4,15 +4,17 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
+	elbtypes "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/wafv2"
 	waftypes "github.com/aws/aws-sdk-go-v2/service/wafv2/types"
+
+	"github.com/jhyeok1023/skills-dashboard/internal/domain"
 )
 
 // maxDiscoveryPages bounds every List walk. Discovery runs behind a settings
@@ -37,58 +39,65 @@ func sortResources(rs []Resource) []Resource {
 	return rs
 }
 
-// TargetGroupDimension converts a target group ARN into the value CloudWatch
-// uses as the TargetGroup dimension, which is the ARN's trailing path.
-//
-//	arn:aws:elasticloadbalancing:ap-northeast-2:1:targetgroup/k8s-default-app/abc
-//	                                            ^------------ this part ------^
-func TargetGroupDimension(arn string) string {
-	if i := strings.Index(arn, ":targetgroup/"); i >= 0 {
-		return arn[i+1:]
+// describeLoadBalancers walks every page of load balancers in the region. Both
+// the load balancer list and the target group list need them, and paging twice
+// against the same API is the kind of duplication that drifts.
+func describeLoadBalancers(ctx context.Context, api LoadBalancerAPI) ([]elbtypes.LoadBalancer, error) {
+	var out []elbtypes.LoadBalancer
+	var in elasticloadbalancingv2.DescribeLoadBalancersInput
+	for page := 0; page < maxDiscoveryPages; page++ {
+		resp, err := api.DescribeLoadBalancers(ctx, &in)
+		if err != nil {
+			return nil, fmt.Errorf("DescribeLoadBalancers: %w", err)
+		}
+		out = append(out, resp.LoadBalancers...)
+		if resp.NextMarker == nil || *resp.NextMarker == "" {
+			break
+		}
+		in.Marker = resp.NextMarker
 	}
-	return arn
+	return out, nil
 }
 
-// LoadBalancerDimension converts a load balancer ARN into CloudWatch's
-// LoadBalancer dimension value.
+// LoadBalancers lists the load balancers in the region.
 //
-//	arn:...:loadbalancer/app/my-alb/abc  ->  app/my-alb/abc
-func LoadBalancerDimension(arn string) string {
-	if i := strings.Index(arn, ":loadbalancer/"); i >= 0 {
-		return arn[i+len(":loadbalancer/"):]
+// The ID is the CloudWatch dimension value rather than the ARN, so picking one
+// in the settings page writes something the metric SEARCH can actually use. An
+// ARN pasted into that field passes the value regex and then matches nothing,
+// which is why the list exists at all.
+func LoadBalancers(ctx context.Context, api LoadBalancerAPI) ([]Resource, error) {
+	lbs, err := describeLoadBalancers(ctx, api)
+	if err != nil {
+		return nil, err
 	}
-	return arn
-}
 
-// FriendlyTargetGroupName strips the generated suffix off a Kubernetes-managed
-// target group so the UI can label it with the service it fronts.
-//
-//	k8s-default-product-d6d507c878  ->  product
-func FriendlyTargetGroupName(name string) string {
-	parts := strings.Split(name, "-")
-	if len(parts) < 4 || parts[0] != "k8s" {
-		return name
+	out := make([]Resource, 0, len(lbs))
+	for _, lb := range lbs {
+		arn := aws.ToString(lb.LoadBalancerArn)
+		out = append(out, Resource{
+			ID:   domain.LoadBalancerDimension(arn),
+			Name: aws.ToString(lb.LoadBalancerName),
+			ARN:  arn,
+			Extra: map[string]string{
+				"type":    string(lb.Type),
+				"scheme":  string(lb.Scheme),
+				"dnsName": aws.ToString(lb.DNSName),
+			},
+		})
 	}
-	return strings.Join(parts[2:len(parts)-1], "-")
+	return sortResources(out), nil
 }
 
 // TargetGroups lists the target groups in the region, annotated with the load
 // balancer each one is attached to.
 func TargetGroups(ctx context.Context, api LoadBalancerAPI) ([]Resource, error) {
-	lbNames := map[string]string{}
-	var lbIn elasticloadbalancingv2.DescribeLoadBalancersInput
-	for page := 0; page < maxDiscoveryPages; page++ {
-		out, err := api.DescribeLoadBalancers(ctx, &lbIn)
-		if err != nil {
-			return nil, fmt.Errorf("DescribeLoadBalancers: %w", err)
-		}
-		for _, lb := range out.LoadBalancers {
-			lbNames[aws.ToString(lb.LoadBalancerArn)] = aws.ToString(lb.LoadBalancerName)
-		}
-		if out.NextMarker == nil || *out.NextMarker == "" {
-			break
-		}
-		lbIn.Marker = out.NextMarker
+	lbs, err := describeLoadBalancers(ctx, api)
+	if err != nil {
+		return nil, err
+	}
+	lbNames := make(map[string]string, len(lbs))
+	for _, lb := range lbs {
+		lbNames[aws.ToString(lb.LoadBalancerArn)] = aws.ToString(lb.LoadBalancerName)
 	}
 
 	var out []Resource
@@ -102,14 +111,14 @@ func TargetGroups(ctx context.Context, api LoadBalancerAPI) ([]Resource, error) 
 			arn := aws.ToString(tg.TargetGroupArn)
 			name := aws.ToString(tg.TargetGroupName)
 			r := Resource{
-				ID:    TargetGroupDimension(arn),
+				ID:    domain.TargetGroupDimension(arn),
 				Name:  name,
 				ARN:   arn,
-				Extra: map[string]string{"friendlyName": FriendlyTargetGroupName(name)},
+				Extra: map[string]string{"friendlyName": domain.FriendlyTargetGroupName(name)},
 			}
 			if len(tg.LoadBalancerArns) > 0 {
 				lbArn := tg.LoadBalancerArns[0]
-				r.Extra["loadBalancer"] = LoadBalancerDimension(lbArn)
+				r.Extra["loadBalancer"] = domain.LoadBalancerDimension(lbArn)
 				r.Extra["loadBalancerName"] = lbNames[lbArn]
 			}
 			out = append(out, r)

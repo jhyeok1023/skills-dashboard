@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -100,6 +101,9 @@ func (c *Config) Validate() error {
 	if c.WAFRegion == "" {
 		c.WAFRegion = "us-east-1"
 	}
+	if err := c.normaliseDimensions(); err != nil {
+		return err
+	}
 	if c.Limits.LogRows <= 0 {
 		c.Limits.LogRows = DefaultLimits().LogRows
 	}
@@ -131,6 +135,35 @@ func (c *Config) Validate() error {
 		if _, err := (domain.WAFQueries{}).ByHeader(h, 1); err != nil {
 			return fmt.Errorf("wafHeaders: %w", err)
 		}
+	}
+	return nil
+}
+
+// albDimensionRe is the shape CloudWatch gives an Application Load Balancer:
+// app/<name>/<id>. The dashboard reads only AWS/ApplicationELB, so an NLB or
+// gateway dimension would be as useless here as a name or an ARN.
+var albDimensionRe = regexp.MustCompile(`^app/[^/]+/[0-9a-fA-F]+$`)
+
+// normaliseDimensions converts the load balancer and target group entries into
+// the form CloudWatch expects, then rejects a load balancer that still is not
+// in it.
+//
+// Both fields hold a CloudWatch dimension value rather than an ARN, and the
+// SEARCH value regex (domain.searchValueRe) accepts ':' and '/' — so an ARN
+// pasted here passes every check and then matches no metric at all. The panel
+// renders empty with no warning, which reads as "this load balancer had no
+// traffic". Converting what we can and refusing the rest turns that silence
+// into a message at the moment of saving.
+func (c *Config) normaliseDimensions() error {
+	c.LoadBalancer = domain.LoadBalancerDimension(strings.TrimSpace(c.LoadBalancer))
+	if c.LoadBalancer != "" && !albDimensionRe.MatchString(c.LoadBalancer) {
+		return fmt.Errorf(
+			"loadBalancer %q는 CloudWatch 차원 값이 아닙니다. app/<이름>/<ID> 형식이어야 합니다 "+
+				"(예: app/my-alb/50dc6c495c0c9188). 전체 ARN을 붙여넣어도 됩니다",
+			c.LoadBalancer)
+	}
+	for i, tg := range c.TargetGroups {
+		c.TargetGroups[i] = domain.TargetGroupDimension(strings.TrimSpace(tg))
 	}
 	return nil
 }

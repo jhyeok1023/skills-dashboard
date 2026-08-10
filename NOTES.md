@@ -11,6 +11,21 @@
 ## 결정 로그
 <!-- append -->
 
+### 2026-08-10 로드 밸런서·타겟 그룹 값은 저장할 때 CloudWatch 차원으로 정규화하고, 안 되면 거부한다
+
+- 맥락: `loadBalancer`에는 CloudWatch `LoadBalancer` 차원(`app/my-alb/50dc6c495c0c9188`)이 들어가야 하는데, 설정 화면은 안내 없는 자유 입력이었고 `Config.Validate()`에 검증이 없었다. 메트릭 SEARCH의 값 정규식(`domain.searchValueRe`)이 `:` 와 `/` 를 허용하므로 전체 ARN을 붙여넣어도 모든 검사를 통과한 뒤 아무 메트릭도 매칭하지 않는다. 결과는 에러 없는 빈 차트 — "트래픽이 없는 로드 밸런서"와 구분되지 않는다. 타겟 그룹을 자동 조회해 체크하는 경로에서만 우연히 올바른 값이 채워졌다.
+- 채택: `Config.Validate()`에서 `domain.LoadBalancerDimension` / `TargetGroupDimension`으로 정규화한 뒤, 로드 밸런서가 `app/<이름>/<hex>` 꼴이 아니면 저장을 거부한다. UI 저장·손으로 고친 `config.json`·시작 시 로드가 모두 같은 경로를 탄다. 설정 화면에는 `loadbalancers` 자동 조회와 플레이스홀더를 붙였다.
+- 기각: ⓐ API 계층(`handlePutConfig`)에서만 정규화 — 손으로 고친 설정 파일이 빠진다. ⓑ 경고만 하고 저장은 허용 — 조용한 빈 차트가 그대로 남는다.
+- 대가: 변환 함수 세 개(`LoadBalancerDimension` / `TargetGroupDimension` / `FriendlyTargetGroupName`)를 `awsx`에서 `domain`으로 옮겼다. `awsx`가 `config`를 import하므로 `config`에서 `awsx`를 쓰면 순환이 된다. NLB/GWLB 차원은 거부된다 — 대시보드가 읽는 네임스페이스는 `AWS/ApplicationELB` 하나뿐이다.
+
+### 2026-08-10 WAF 로그는 WAF 리전 클라이언트로 조회하고, 리전 판단은 Clients를 출처로 삼는다
+
+- 맥락: CLOUDFRONT 스코프 웹 ACL은 us-east-1에만 로그를 남긴다. `Config.WAFRegion`(기본 `us-east-1`)과 그 리전에 핀된 `Clients.LogsGlobal`이 이미 있었는데 `LogsGlobal`은 프로덕션 코드에서 한 번도 쓰이지 않았다. Insights 러너는 `clients.Logs` 하나만 물고 있어 us-east-1 그룹 이름을 직접 넣어도 `StartQuery`가 없는 그룹으로 실패했고, 로그 그룹 자동 조회도 작업 리전만 봐서 `aws-waf-logs-*` 가 아예 목록에 없었다. 리전 판단도 두 갈래였다 — `creds.Validate()`가 빈 리전을 먼저 거르므로 `main.go`의 `cfg.Region` 폴백은 도달 불가였고(즉 `config.json`의 `region`은 클라이언트에 영향이 없었다), 그런데 WAF 메트릭 패널은 그 `cfg.Region`을 비교해 `CWGlobal` 사용 여부를 정했다.
+- 채택: WAF 로그 전용 `InsightsGlobal` 러너를 두고, 러너·리전·로그 그룹을 `logSource` 한 덩어리로 묶어 패널 빌더에 넘긴다. 캐시 키에 리전을 포함해 두 리전의 동명 그룹이 서로의 결과를 받지 않게 했다. 조회 kind `waf-loggroups` 를 추가해 목록도 WAF 리전에서 읽는다. 리전 판단의 출처는 `Clients.Region` / `Clients.WAFRegion` 하나로 모으고, 시작 시 `cfg.Region`을 실제 자격증명 리전으로 맞춰 저장한다.
+- 기각: ⓐ 패널마다 `if wafRegion != region` 분기 — 이미 있던 그 분기가 어긋난 원인이었다. ⓑ 리전을 설정 화면에서 편집 가능하게 — 클라이언트는 시작 시 1회 생성이라 재시작 없이는 적용되지 않는다. 읽기 전용 표시로 두고 어디서 바꾸는지 안내한다.
+- 대가: 두 리전이 다르면 Insights 동시 실행 세마포어가 두 개가 된다(각 `insightsConcurrency`). 같은 리전이면 러너를 공유해 한 개로 유지한다.
+- 남은 한계: `Config.WebACLs`는 ACL 이름만 저장하고 스코프를 잃는다. 그래서 WAF 메트릭 패널은 리전이 다를 때 선택된 ACL을 전부 WAF 리전에서 읽고, REGIONAL 스코프를 섞어 고르면 그쪽이 빈다. 고치려면 설정 스키마에 스코프를 넣어야 한다.
+
 ### 2026-08-10 헬스체크 경로를 팟 로그 집계에서 제외한다
 
 - 맥락: 몇 초마다 도는 liveness/readiness 프로브가 요청 라인의 최대 공급원이라, 아무 일도 하지 않는 경로 쪽으로 응답 시간 백분위를 끌어내린다. 프로브가 실패하기 시작하면 동일한 행 수천 개가 비정상 응답 표를 채워 진짜 장애를 `LIMIT` 밖으로 밀어낸다.

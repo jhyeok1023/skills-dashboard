@@ -114,6 +114,8 @@ export interface Identity {
 	arn: string;
 	userId: string;
 	region: string;
+	/** Where CLOUDFRONT-scope WAF is read from. Absent until credentials resolve. */
+	wafRegion?: string;
 }
 
 export interface LogFormat {

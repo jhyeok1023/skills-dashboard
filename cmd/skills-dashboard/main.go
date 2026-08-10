@@ -82,9 +82,6 @@ func run() error {
 	} else if err := creds.Validate(); err != nil {
 		svc.CredentialError = err
 	} else {
-		if cfg.Region != "" && creds.Region == "" {
-			creds.Region = cfg.Region
-		}
 		clients, err := awsx.New(context.Background(), creds, cfg.WAFRegion)
 		if err != nil {
 			svc.CredentialError = err
@@ -92,15 +89,43 @@ func run() error {
 			svc.Clients = clients
 			svc.Insights.API = clients.Logs
 
+			// WAF logs need their own runner. A CLOUDFRONT-scoped web ACL
+			// publishes only into us-east-1, so querying its log group through
+			// the working-region client fails on a group that is not there.
+			// When the regions coincide the runner is shared, which keeps the
+			// concurrency limit a single pool rather than two of the same size.
+			if clients.WAFRegion == clients.Region {
+				svc.InsightsGlobal = svc.Insights
+			} else {
+				svc.InsightsGlobal = &awsx.InsightsRunner{
+					Concurrency: cfg.Limits.InsightsConcurrency,
+					Timeout:     time.Duration(cfg.Limits.QueryTimeoutSeconds) * time.Second,
+					API:         clients.LogsGlobal,
+				}
+			}
+
+			// The credentials decide the region; config.json only records it.
+			// Leaving a stale region in the file is what let the dashboard
+			// reason about one region while calling another.
+			if cfg.Region != clients.Region {
+				logger.Info("recording the credentials' region in the config",
+					"was", cfg.Region, "now", clients.Region)
+				cfg.Region = clients.Region
+				if err := store.Set(cfg); err != nil {
+					logger.Warn("could not save the region to the config", "error", err)
+				}
+			}
+
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			identity, err := awsx.WhoAmI(ctx, clients.STS, creds.Region)
+			identity, err := awsx.WhoAmI(ctx, clients.STS, clients.Region)
 			cancel()
 			if err != nil {
 				svc.CredentialError = fmt.Errorf("자격증명 확인 실패: %w", err)
 			} else {
+				identity.WAFRegion = clients.WAFRegion
 				svc.Identity = identity
 				logger.Info("credentials accepted", "account", identity.Account, "region", identity.Region,
-					"key", creds.Redacted())
+					"wafRegion", identity.WAFRegion, "key", creds.Redacted())
 			}
 		}
 	}

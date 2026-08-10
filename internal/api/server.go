@@ -26,6 +26,13 @@ type Service struct {
 	Identity awsx.Identity
 	Logger   *slog.Logger
 
+	// InsightsGlobal queries the WAF region. A CLOUDFRONT-scoped web ACL
+	// publishes its logs only into us-east-1, so a runner bound to the working
+	// region cannot see the log group at all — StartQuery fails with a group
+	// that does not exist. When the two regions coincide this is the same
+	// runner as Insights, so the concurrency budget stays a single pool.
+	InsightsGlobal *awsx.InsightsRunner
+
 	// Now is overridable so tests can pin the window.
 	Now func() time.Time
 
@@ -141,6 +148,28 @@ func (s *Service) requireAWS(w http.ResponseWriter) bool {
 		return false
 	}
 	return true
+}
+
+// region is where the primary clients point, and wafRegion is where the
+// CLOUDFRONT-scope ones do.
+//
+// Both read the clients rather than the stored config. The clients were built
+// from the credentials' region (awsx.New), while config.json carries a region
+// of its own that nothing enforces — asking the config which region a call
+// lands in is how the two came to disagree. With no clients there is nothing to
+// describe, so the config is all that is left to answer with.
+func (s *Service) region() string {
+	if s.Clients != nil {
+		return s.Clients.Region
+	}
+	return s.Store.Get().Region
+}
+
+func (s *Service) wafRegion() string {
+	if s.Clients != nil {
+		return s.Clients.WAFRegion
+	}
+	return s.Store.Get().WAFRegion
 }
 
 // window resolves the range and period from the query string.

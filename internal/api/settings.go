@@ -10,7 +10,6 @@ import (
 	waftypes "github.com/aws/aws-sdk-go-v2/service/wafv2/types"
 
 	"github.com/jhyeok1023/skills-dashboard/internal/awsx"
-	"github.com/jhyeok1023/skills-dashboard/internal/config"
 	"github.com/jhyeok1023/skills-dashboard/internal/domain"
 )
 
@@ -115,12 +114,11 @@ func (s *Service) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind := r.PathValue("kind")
-	cfg := s.Store.Get()
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	resources, err := s.discover(ctx, kind, cfg, r.URL.Query().Get("prefix"))
+	resources, err := s.discover(ctx, kind, r.URL.Query().Get("prefix"))
 	if err != nil {
 		if err == errUnknownKind {
 			badRequest(w, fmt.Errorf("unknown discovery kind %q", kind))
@@ -134,16 +132,31 @@ func (s *Service) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 
 var errUnknownKind = fmt.Errorf("unknown discovery kind")
 
-func (s *Service) discover(ctx context.Context, kind string, cfg config.Config, prefix string) ([]awsx.Resource, error) {
-	key := "discovery|" + kind + "|" + prefix + "|" + cfg.Region
+func (s *Service) discover(ctx context.Context, kind, prefix string) ([]awsx.Resource, error) {
+	// The key names the regions the clients are pointed at rather than the one
+	// the config records, which is a note about the credentials and does not
+	// decide where a call lands. A listing from us-east-1 and one from the
+	// working region must not be able to answer for each other.
+	key := "discovery|" + kind + "|" + prefix + "|" + s.region() + "|" + s.wafRegion()
 	switch kind {
 	case "targetgroups":
 		return awsx.Cached(ctx, s.Cache, key, func(ctx context.Context) ([]awsx.Resource, error) {
 			return awsx.TargetGroups(ctx, s.Clients.ELB)
 		})
+	case "loadbalancers":
+		return awsx.Cached(ctx, s.Cache, key, func(ctx context.Context) ([]awsx.Resource, error) {
+			return awsx.LoadBalancers(ctx, s.Clients.ELB)
+		})
 	case "loggroups":
 		return awsx.Cached(ctx, s.Cache, key, func(ctx context.Context) ([]awsx.Resource, error) {
 			return awsx.LogGroups(ctx, s.Clients.Logs, prefix)
+		})
+	case "waf-loggroups":
+		// WAF log groups are listed from the WAF region. A CLOUDFRONT-scoped
+		// web ACL writes only into us-east-1, so listing the working region
+		// returns nothing and reads as "this account has no WAF logging".
+		return awsx.Cached(ctx, s.Cache, key, func(ctx context.Context) ([]awsx.Resource, error) {
+			return awsx.LogGroups(ctx, s.Clients.LogsGlobal, prefix)
 		})
 	case "rdsproxies":
 		return awsx.Cached(ctx, s.Cache, key, func(ctx context.Context) ([]awsx.Resource, error) {

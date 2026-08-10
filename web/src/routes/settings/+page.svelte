@@ -108,10 +108,18 @@
 				<CopyValue value={identity.arn} mono label="ARN" />
 				<span class="muted tiny">리전</span>
 				<CopyValue value={identity.region} mono label="리전" />
+				{#if identity.wafRegion}
+					<span class="muted tiny">WAF 리전</span>
+					<CopyValue value={identity.wafRegion} mono label="WAF 리전" />
+				{/if}
 			</div>
 			<p class="tiny muted" data-value>
 				액세스 키는 바이너리를 실행한 디렉터리의 .env 파일에서 읽습니다. 이 화면에서는 수정하지
 				않습니다.
+			</p>
+			<p class="tiny muted" data-value>
+				리전은 .env 의 AWS_REGION, WAF 리전은 ~/.skills-dashboard/config.json 의 wafRegion 이
+				정합니다. AWS 클라이언트는 시작할 때 한 번 만들어지므로 변경하려면 재시작해야 합니다.
 			</p>
 		{:else}
 			<p class="warning" data-value>{credentialProblem || '자격증명을 확인하는 중입니다…'}</p>
@@ -168,6 +176,9 @@ AWS_REGION=ap-northeast-2</pre>
 						{discovering.loggroups ? '조회 중…' : '자동 조회'}
 					</button>
 				</div>
+				{#if discoveryError.loggroups}
+					<p class="warning tiny" data-value>{discoveryError.loggroups}</p>
+				{/if}
 				{#if discovered.loggroups?.length}
 					<ul class="chips">
 						{#each discovered.loggroups as r (r.id)}
@@ -184,20 +195,71 @@ AWS_REGION=ap-northeast-2</pre>
 			<div class="field">
 				<label for="waflog">WAF 로그 그룹</label>
 				<div class="row">
-					<input id="waflog" class="control grow mono" bind:value={config.wafLogGroup} />
+					<input
+						id="waflog"
+						class="control grow mono"
+						placeholder="aws-waf-logs-..."
+						bind:value={config.wafLogGroup}
+					/>
 					<button
 						type="button"
 						class="control"
-						onclick={() => discover('loggroups', 'aws-waf-logs-')}
+						onclick={() => discover('waf-loggroups', 'aws-waf-logs-')}
 					>
-						자동 조회
+						{discovering['waf-loggroups'] ? '조회 중…' : '자동 조회'}
 					</button>
 				</div>
+				{#if discoveryError['waf-loggroups']}
+					<p class="warning tiny" data-value>{discoveryError['waf-loggroups']}</p>
+				{/if}
+				{#if discovered['waf-loggroups']?.length}
+					<ul class="chips">
+						{#each discovered['waf-loggroups'] as r (r.id)}
+							<li>
+								<button type="button" class="chip" onclick={() => (config!.wafLogGroup = r.id)}>
+									<span data-value class="mono">{r.name}</span>
+								</button>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+				<p class="tiny muted" data-value>
+					CLOUDFRONT 스코프 WAF는 {identity?.wafRegion ?? config.wafRegion} 에만 로그를 남깁니다. 이 목록도
+					그 리전에서 조회합니다.
+				</p>
 			</div>
 
 			<div class="field">
 				<label for="lb">로드 밸런서 (CloudWatch 차원)</label>
-				<input id="lb" class="control mono" bind:value={config.loadBalancer} />
+				<div class="row">
+					<input
+						id="lb"
+						class="control grow mono"
+						placeholder="app/my-alb/50dc6c495c0c9188"
+						bind:value={config.loadBalancer}
+					/>
+					<button type="button" class="control" onclick={() => discover('loadbalancers')}>
+						{discovering.loadbalancers ? '조회 중…' : '자동 조회'}
+					</button>
+				</div>
+				{#if discoveryError.loadbalancers}
+					<p class="warning tiny" data-value>{discoveryError.loadbalancers}</p>
+				{/if}
+				{#if discovered.loadbalancers?.length}
+					<ul class="chips">
+						{#each discovered.loadbalancers as r (r.id)}
+							<li>
+								<button type="button" class="chip" onclick={() => (config!.loadBalancer = r.id)}>
+									<span data-value>{r.name}</span>
+									<span class="tiny muted mono" data-value>{r.id}</span>
+								</button>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+				<p class="tiny muted" data-value>
+					ARN이 아니라 ARN의 뒤쪽 경로입니다. 전체 ARN을 붙여넣으면 저장할 때 변환합니다.
+				</p>
 			</div>
 
 			<div class="field">
@@ -505,6 +567,11 @@ AWS_REGION=ap-northeast-2</pre>
 		border-radius: 999px;
 		padding: 3px 10px;
 		font-size: 12px;
+		/* A chip may carry a name and the dimension value under it; the gap is
+		   what keeps the two from reading as one string. */
+		display: inline-flex;
+		align-items: baseline;
+		gap: 6px;
 		/* Log group names are long; they wrap inside the chip. */
 		white-space: normal;
 		overflow-wrap: anywhere;

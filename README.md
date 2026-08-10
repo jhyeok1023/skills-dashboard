@@ -96,6 +96,27 @@ web/                      SvelteKit (SSR 없음), uPlot + layerchart
 
 ---
 
+## 리전과 모니터링 대상
+
+리전은 두 개입니다. 작업 리전은 `.env` 의 `AWS_REGION` 이, WAF 리전은 `~/.skills-dashboard/config.json` 의 `wafRegion`(기본 `us-east-1`)이 정합니다. AWS 클라이언트는 시작할 때 한 번 만들어지므로 둘 중 무엇을 바꾸든 재시작해야 반영되며, 설정 화면은 두 값을 읽기 전용으로 보여 주기만 합니다.
+
+### WAF 로그 그룹은 버지니아에 있습니다
+
+CLOUDFRONT 스코프 웹 ACL은 배포가 어디서 트래픽을 받든 **us-east-1 에만** 로그와 메트릭을 남깁니다. 그래서 WAF 패널의 Logs Insights 쿼리와 로그 그룹 자동 조회는 작업 리전이 아니라 WAF 리전 클라이언트를 씁니다. 설정 화면의 WAF `자동 조회` 도 그 리전의 `aws-waf-logs-*` 그룹만 보여 줍니다.
+
+### 로드 밸런서는 ARN이 아니라 차원 값입니다
+
+`loadBalancer` 에 들어가는 값은 CloudWatch 의 `LoadBalancer` 차원, 즉 ARN 의 뒤쪽 경로입니다.
+
+```
+arn:aws:elasticloadbalancing:ap-northeast-2:123:loadbalancer/app/my-alb/50dc6c495c0c9188
+                                                             └──────── 이 부분 ────────┘
+```
+
+`자동 조회` 로 고르면 이 형태로 채워지고, 전체 ARN을 붙여넣어도 저장할 때 변환합니다. 변환으로도 살릴 수 없는 값(로드 밸런서 **이름**만 넣는 등)은 저장이 거부됩니다 — 메트릭 SEARCH 는 `:` 와 `/` 를 허용하므로 잘못된 값도 통과한 뒤 아무것도 매칭하지 않고, 그러면 "트래픽이 없는 로드 밸런서" 와 구분되지 않는 빈 차트가 나오기 때문입니다.
+
+---
+
 ## 로그 형식
 
 Container Insights / fluent-bit 봉투를 읽습니다. 안쪽 애플리케이션 라인이 JSON이면 `log_processed`의 파싱 결과를 쓰고, 평문이면 정규식을 적용합니다.
@@ -118,6 +139,7 @@ Container Insights / fluent-bit 봉투를 읽습니다. 안쪽 애플리케이�
 - **OOMKilled 전용 지표가 없습니다.** CrashLoop은 컨테이너 재시작 증가로, OOM은 팟 로그의 `OOMKilled` 패턴으로 보완하며 완전하지 않음을 UI에 표시합니다.
 - **Container Insights가 꺼져 있으면** 팟·노드 관련 패널이 빕니다. 그럴 때는 빈 화면 대신 안내를 띄웁니다.
 - **WAF 로그 기반 값과 CloudWatch 메트릭 값은 정확히 일치하지 않습니다.** 로그 전달이 메트릭보다 몇 분 늦기 때문이며, 각 값이 자신의 출처를 표시합니다.
+- **웹 ACL 선택은 스코프를 기억하지 않습니다.** 설정에는 ACL 이름만 저장되므로, WAF 리전이 작업 리전과 다를 때 WAF 메트릭 패널은 선택된 ACL을 전부 WAF 리전에서 읽습니다. REGIONAL 스코프 ACL은 작업 리전에 메트릭을 게시하므로 두 스코프를 섞어 고르면 REGIONAL 쪽이 빕니다. 한쪽 스코프만 쓰는 경우에는 문제가 없습니다.
 
 ## 라이선스
 

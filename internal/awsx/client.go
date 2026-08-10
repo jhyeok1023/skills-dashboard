@@ -141,12 +141,17 @@ func New(ctx context.Context, creds config.Credentials, wafRegion string) (*Clie
 	return c, nil
 }
 
-// Identity is who the configured access key belongs to.
+// Identity is who the configured access key belongs to, and where it is
+// pointed. The two regions are reported because they are set outside the UI —
+// the working region by the .env file, the WAF one by the config file — and an
+// operator looking at an empty WAF panel needs to see which region the
+// dashboard actually queried.
 type Identity struct {
-	Account string `json:"account"`
-	ARN     string `json:"arn"`
-	UserID  string `json:"userId"`
-	Region  string `json:"region"`
+	Account   string `json:"account"`
+	ARN       string `json:"arn"`
+	UserID    string `json:"userId"`
+	Region    string `json:"region"`
+	WAFRegion string `json:"wafRegion,omitempty"`
 }
 
 // WhoAmI validates the credentials against AWS.

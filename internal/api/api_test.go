@@ -19,6 +19,8 @@ import (
 	logtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
 	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
+	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
+	elbtypes "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 
 	"github.com/jhyeok1023/skills-dashboard/internal/awsx"
 	"github.com/jhyeok1023/skills-dashboard/internal/config"
@@ -75,9 +77,26 @@ type stubLogs struct {
 	queries map[string]string // queryId -> kind
 	next    int
 	starts  []string
+	// groups records the log group each query was aimed at, which is how the
+	// tests tell a query sent to the working region from one sent to us-east-1.
+	groups []string
+	// name labels the stub in failure messages.
+	name string
+	// logGroups is what this region holds. The two regions hold different
+	// groups, which is the whole reason the WAF panels need their own client.
+	logGroups []string
 }
 
-func newStubLogs() *stubLogs { return &stubLogs{queries: map[string]string{}} }
+func newStubLogs(name string, logGroups ...string) *stubLogs {
+	return &stubLogs{queries: map[string]string{}, name: name, logGroups: logGroups}
+}
+
+// startedGroups is a snapshot of every log group this stub was queried against.
+func (s *stubLogs) startedGroups() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.groups...)
+}
 
 func classify(q string) string {
 	switch {
@@ -115,6 +134,7 @@ func (s *stubLogs) StartQuery(_ context.Context, in *cloudwatchlogs.StartQueryIn
 	id := fmt.Sprintf("q%d", s.next)
 	s.queries[id] = classify(aws.ToString(in.QueryString))
 	s.starts = append(s.starts, aws.ToString(in.QueryString))
+	s.groups = append(s.groups, in.LogGroupNames...)
 	return &cloudwatchlogs.StartQueryOutput{QueryId: aws.String(id)}, nil
 }
 
@@ -133,10 +153,16 @@ func (s *stubLogs) StopQuery(_ context.Context, _ *cloudwatchlogs.StopQueryInput
 	return &cloudwatchlogs.StopQueryOutput{}, nil
 }
 
-func (s *stubLogs) DescribeLogGroups(_ context.Context, _ *cloudwatchlogs.DescribeLogGroupsInput, _ ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.DescribeLogGroupsOutput, error) {
-	return &cloudwatchlogs.DescribeLogGroupsOutput{
-		LogGroups: []logtypes.LogGroup{{LogGroupName: aws.String("/aws/containerinsights/prod/application")}},
-	}, nil
+func (s *stubLogs) DescribeLogGroups(_ context.Context, in *cloudwatchlogs.DescribeLogGroupsInput, _ ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.DescribeLogGroupsOutput, error) {
+	prefix := aws.ToString(in.LogGroupNamePrefix)
+	var out cloudwatchlogs.DescribeLogGroupsOutput
+	for _, name := range s.logGroups {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		out.LogGroups = append(out.LogGroups, logtypes.LogGroup{LogGroupName: aws.String(name)})
+	}
+	return &out, nil
 }
 
 func f(name, value string) logtypes.ResultField {
@@ -224,6 +250,28 @@ func rowsFor(kind string) [][]logtypes.ResultField {
 	}
 }
 
+// stubELB answers the load balancer discovery. The ARN is the point: what the
+// endpoint hands back must be the CloudWatch dimension, not this.
+type stubELB struct{}
+
+const testLBArn = "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:loadbalancer/app/my-alb/50dc6c495c0c9188"
+
+func (stubELB) DescribeLoadBalancers(context.Context, *elasticloadbalancingv2.DescribeLoadBalancersInput, ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeLoadBalancersOutput, error) {
+	return &elasticloadbalancingv2.DescribeLoadBalancersOutput{
+		LoadBalancers: []elbtypes.LoadBalancer{{
+			LoadBalancerArn:  aws.String(testLBArn),
+			LoadBalancerName: aws.String("my-alb"),
+			DNSName:          aws.String("my-alb-123.ap-northeast-2.elb.amazonaws.com"),
+			Type:             elbtypes.LoadBalancerTypeEnumApplication,
+			Scheme:           elbtypes.LoadBalancerSchemeEnumInternetFacing,
+		}},
+	}, nil
+}
+
+func (stubELB) DescribeTargetGroups(context.Context, *elasticloadbalancingv2.DescribeTargetGroupsInput, ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeTargetGroupsOutput, error) {
+	return &elasticloadbalancingv2.DescribeTargetGroupsOutput{}, nil
+}
+
 // stubEKS supplies the node group scaling limits, the only source for the
 // minimum and maximum node counts.
 type stubEKS struct{}
@@ -263,7 +311,11 @@ func newTestService(t *testing.T) (*Service, http.Handler) {
 		t.Fatal(err)
 	}
 
-	logs := newStubLogs()
+	// Two regions, two sets of log groups. The WAF group exists only in
+	// us-east-1, so a WAF query that goes to the working region finds nothing —
+	// which is exactly the failure the split runner exists to prevent.
+	logs := newStubLogs("ap-northeast-2", "/aws/containerinsights/prod/application")
+	logsGlobal := newStubLogs("us-east-1", "aws-waf-logs-demo")
 	metrics := &stubMetrics{}
 	svc := &Service{
 		Store: store,
@@ -271,10 +323,12 @@ func newTestService(t *testing.T) (*Service, http.Handler) {
 		Cache: &awsx.Cache{TTL: time.Minute},
 		Clients: &awsx.Clients{
 			Region: "ap-northeast-2", WAFRegion: "us-east-1",
-			CW: metrics, CWGlobal: metrics, Logs: logs, LogsGlobal: logs, EKS: stubEKS{},
+			CW: metrics, CWGlobal: metrics, Logs: logs, LogsGlobal: logsGlobal,
+			EKS: stubEKS{}, ELB: stubELB{},
 		},
-		Insights: &awsx.InsightsRunner{API: logs, Concurrency: 6, PollInterval: time.Millisecond},
-		Metrics:  &awsx.MetricFetcher{},
+		Insights:       &awsx.InsightsRunner{API: logs, Concurrency: 6, PollInterval: time.Millisecond},
+		InsightsGlobal: &awsx.InsightsRunner{API: logsGlobal, Concurrency: 6, PollInterval: time.Millisecond},
+		Metrics:        &awsx.MetricFetcher{},
 	}
 	return svc, svc.Handler()
 }
@@ -717,7 +771,7 @@ func TestUnselectedResourcesProduceAnExplanationNotAnError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	logs := newStubLogs()
+	logs := newStubLogs("ap-northeast-2")
 	metrics := &stubMetrics{}
 	svc := &Service{
 		Store: store,
@@ -855,6 +909,117 @@ func TestDiscovery(t *testing.T) {
 
 	if rec := get(t, h, "/api/discovery/nonsense"); rec.Code != http.StatusBadRequest {
 		t.Errorf("unknown kind: status %d", rec.Code)
+	}
+}
+
+func discover(t *testing.T, h http.Handler, path string) discoveryResponse {
+	t.Helper()
+	rec := get(t, h, path)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s: status %d: %s", path, rec.Code, rec.Body.String())
+	}
+	var resp discoveryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	return resp
+}
+
+// A CLOUDFRONT-scoped web ACL logs only into us-east-1. Listing the working
+// region returns nothing, which reads as "this account has no WAF logging" and
+// leaves the operator with a field they can only guess at.
+func TestWAFLogGroupsAreListedFromTheWAFRegion(t *testing.T) {
+	_, h := newTestService(t)
+
+	resp := discover(t, h, "/api/discovery/waf-loggroups?prefix=aws-waf-logs-")
+	if len(resp.Resources) != 1 || resp.Resources[0].ID != "aws-waf-logs-demo" {
+		t.Fatalf("waf-loggroups = %+v, want the us-east-1 group", resp.Resources)
+	}
+
+	// The working-region listing must not have acquired it.
+	if got := discover(t, h, "/api/discovery/loggroups?prefix=aws-waf-logs-"); len(got.Resources) != 0 {
+		t.Errorf("the working region reported WAF log groups it does not have: %+v", got.Resources)
+	}
+}
+
+// The WAF panels query us-east-1; the pod panels query the working region.
+// Sending a WAF query to the working region fails on a log group that is not
+// there, which is what the dashboard did before the runners were split.
+func TestWAFLogQueriesGoToTheWAFRegion(t *testing.T) {
+	svc, h := newTestService(t)
+
+	if rec := get(t, h, "/api/page/waf?range=1h&period=5m"); rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if rec := get(t, h, "/api/page/pod-logs?range=1h&period=5m"); rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+
+	global := svc.Clients.LogsGlobal.(*stubLogs).startedGroups()
+	primary := svc.Clients.Logs.(*stubLogs).startedGroups()
+
+	if len(global) == 0 {
+		t.Fatal("no query reached us-east-1")
+	}
+	for _, g := range global {
+		if g != "aws-waf-logs-demo" {
+			t.Errorf("us-east-1 was queried for %q, want only the WAF group", g)
+		}
+	}
+	if len(primary) == 0 {
+		t.Fatal("no query reached the working region")
+	}
+	for _, g := range primary {
+		if g == "aws-waf-logs-demo" {
+			t.Error("a WAF query went to the working region, where the group does not exist")
+		}
+	}
+}
+
+// Two regions can hold a log group of the same name. Keyed on the name alone,
+// the second query would be answered out of the first one's cache entry and
+// the second region would never be called at all.
+func TestLogCacheIsKeyedByRegion(t *testing.T) {
+	svc, _ := newTestService(t)
+	w, err := domain.NewWindow(testNow, domain.Range1h, domain.Period5m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := requestCtx{ctx: context.Background(), w: w, cfg: svc.Store.Get()}
+	q := domain.WAFQueries{}.ActionSeries(w)
+
+	// Identical in every respect but the region they are read from.
+	const shared = "same-name-in-both-regions"
+	primary := logSource{runner: svc.Insights, region: "ap-northeast-2", group: shared}
+	global := logSource{runner: svc.InsightsGlobal, region: "us-east-1", group: shared}
+
+	svc.runLogQueries(rc, primary, "same-panel", []domain.Query{q})
+	svc.runLogQueries(rc, global, "same-panel", []domain.Query{q})
+
+	if got := svc.Clients.LogsGlobal.(*stubLogs).startedGroups(); len(got) == 0 {
+		t.Error("the us-east-1 query was served from the working region's cache entry")
+	}
+}
+
+// The endpoint hands back the CloudWatch dimension, not the ARN. An ARN in
+// that field passes every check the config makes and then matches no metric,
+// so the panel renders empty with nothing to explain why.
+func TestLoadBalancerDiscoveryReturnsTheDimensionNotTheARN(t *testing.T) {
+	_, h := newTestService(t)
+
+	resp := discover(t, h, "/api/discovery/loadbalancers")
+	if len(resp.Resources) != 1 {
+		t.Fatalf("got %d load balancers", len(resp.Resources))
+	}
+	r := resp.Resources[0]
+	if r.ID != "app/my-alb/50dc6c495c0c9188" {
+		t.Errorf("ID = %q, want the CloudWatch dimension", r.ID)
+	}
+	if r.Name != "my-alb" {
+		t.Errorf("Name = %q, want the load balancer name", r.Name)
+	}
+	if r.ARN != testLBArn {
+		t.Errorf("ARN = %q, want it carried through for reference", r.ARN)
 	}
 }
 

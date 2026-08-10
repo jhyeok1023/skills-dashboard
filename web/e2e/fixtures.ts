@@ -390,7 +390,35 @@ const identity = {
 	account: '123456789012',
 	arn: 'arn:aws:iam::123456789012:user/dashboard-readonly',
 	userId: 'AIDAEXAMPLEEXAMPLE',
-	region: 'ap-northeast-2'
+	region: 'ap-northeast-2',
+	wafRegion: 'us-east-1'
+};
+
+/**
+ * Discovery answers, per kind. They differ by kind on purpose: the WAF log
+ * group listing comes from us-east-1 and the working-region listing does not
+ * carry it, and a load balancer is offered as its CloudWatch dimension rather
+ * than its ARN.
+ */
+const discoveries: Record<string, unknown[]> = {
+	clusters: [
+		{ id: 'prod', name: 'prod', extra: { logGroup: '/aws/containerinsights/prod/application' } }
+	],
+	loggroups: [
+		{
+			id: '/aws/containerinsights/prod/application',
+			name: '/aws/containerinsights/prod/application'
+		}
+	],
+	'waf-loggroups': [{ id: 'aws-waf-logs-demo', name: 'aws-waf-logs-demo' }],
+	loadbalancers: [
+		{
+			id: 'app/my-alb/50dc6c495c0c9188',
+			name: 'my-alb',
+			arn: 'arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:loadbalancer/app/my-alb/50dc6c495c0c9188',
+			extra: { type: 'application', scheme: 'internet-facing' }
+		}
+	]
 };
 
 const config = {
@@ -447,16 +475,8 @@ export async function mockApi(page: Page) {
 		}
 
 		if (path.startsWith('/api/discovery/')) {
-			return json({
-				kind: path.split('/').pop(),
-				resources: [
-					{
-						id: 'prod',
-						name: 'prod',
-						extra: { logGroup: '/aws/containerinsights/prod/application' }
-					}
-				]
-			});
+			const kind = path.split('/').pop() ?? '';
+			return json({ kind, resources: discoveries[kind] ?? discoveries.clusters });
 		}
 
 		if (path === '/api/logfmt/preview') {

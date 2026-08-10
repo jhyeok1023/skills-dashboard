@@ -177,6 +177,56 @@ func TestValidateFillsDefaultsAndRejectsBadInput(t *testing.T) {
 	}
 }
 
+// A load balancer ARN pasted into the settings page passes the metric SEARCH
+// value regex and then matches nothing, so the panel renders empty with no
+// explanation. Converting it on the way in is what stops that from happening.
+func TestLoadBalancerARNIsConvertedToTheDimension(t *testing.T) {
+	c := Default()
+	c.LoadBalancer = "  arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:loadbalancer/app/my-alb/50dc6c495c0c9188  "
+	c.TargetGroups = []string{
+		"arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/k8s-default-product-d6d507c878/73e2d6bc24d8a067",
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c.LoadBalancer != "app/my-alb/50dc6c495c0c9188" {
+		t.Errorf("LoadBalancer = %q, want the CloudWatch dimension", c.LoadBalancer)
+	}
+	if want := "targetgroup/k8s-default-product-d6d507c878/73e2d6bc24d8a067"; c.TargetGroups[0] != want {
+		t.Errorf("TargetGroups[0] = %q, want %q", c.TargetGroups[0], want)
+	}
+}
+
+// Everything a conversion cannot rescue is refused at the point of saving. A
+// rejected save names the problem; an accepted one produces a blank chart that
+// looks like a load balancer with no traffic.
+func TestLoadBalancerMustBeACloudWatchDimension(t *testing.T) {
+	for _, bad := range []string{
+		"my-alb",              // the name, which is what the console shows
+		"net/my-nlb/abc123",   // an NLB: the dashboard reads AWS/ApplicationELB only
+		"app/my-alb",          // truncated
+		"app/my-alb/50dc/x",   // an extra segment
+		"app/my-alb/not-hex!", // not an id
+	} {
+		c := Default()
+		c.LoadBalancer = bad
+		if err := c.Validate(); err == nil {
+			t.Errorf("accepted %q as a load balancer dimension", bad)
+		}
+	}
+
+	// An empty field is a load balancer that has not been chosen yet, not a
+	// mistake: the target group panel falls back to per-target-group filters.
+	c := Default()
+	c.LoadBalancer = "   "
+	if err := c.Validate(); err != nil {
+		t.Errorf("an unset load balancer was rejected: %v", err)
+	}
+	if c.LoadBalancer != "" {
+		t.Errorf("LoadBalancer = %q, want it trimmed to empty", c.LoadBalancer)
+	}
+}
+
 func TestStoreRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.json")
 

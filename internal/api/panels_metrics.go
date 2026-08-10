@@ -231,7 +231,7 @@ func targetGroupFilterSets(cfg config.Config) []filterSet {
 		if cfg.LoadBalancer != "" {
 			filters["LoadBalancer"] = cfg.LoadBalancer
 		}
-		out = append(out, filterSet{id: tg, label: awsx.FriendlyTargetGroupName(lastSegmentName(tg)), filters: filters})
+		out = append(out, filterSet{id: tg, label: domain.FriendlyTargetGroupName(lastSegmentName(tg)), filters: filters})
 	}
 	if len(out) == 0 && cfg.LoadBalancer != "" {
 		out = append(out, filterSet{
@@ -484,9 +484,11 @@ func (s *Service) buildWAFMetricsPanel(rc requestCtx) (*domain.Panel, error) {
 	}
 
 	// CLOUDFRONT-scoped ACLs publish into us-east-1 regardless of where the
-	// distribution serves from.
+	// distribution serves from. The comparison is between the regions the
+	// clients were actually built for, not the two the config records: the
+	// config's region is a note about the credentials, not what sets them.
 	api := s.Clients.CW
-	if rc.cfg.WAFRegion != "" && rc.cfg.WAFRegion != rc.cfg.Region {
+	if s.wafRegion() != s.region() {
 		api = s.Clients.CWGlobal
 	}
 
