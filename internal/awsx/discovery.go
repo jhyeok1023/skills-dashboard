@@ -2,8 +2,10 @@ package awsx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
@@ -34,29 +36,46 @@ type Resource struct {
 	Extra map[string]string `json:"extra,omitempty"`
 }
 
+// Listing is a discovery result together with whether the walk was cut short.
+//
+// A capped list that says nothing about being capped is worse than a short one:
+// the resource the operator is looking for is simply not offered, and the page
+// gives them no reason to doubt the list they are reading. Every walk here is
+// bounded, so every walk has to be able to say it ran into the bound.
+type Listing struct {
+	Resources []Resource
+	Truncated bool
+}
+
 func sortResources(rs []Resource) []Resource {
 	sort.Slice(rs, func(i, j int) bool { return rs[i].Name < rs[j].Name })
 	return rs
 }
 
+// sorted finishes a walk: the resources in name order, plus whether the page
+// cap stopped it early.
+func sorted(rs []Resource, truncated bool) Listing {
+	return Listing{Resources: sortResources(rs), Truncated: truncated}
+}
+
 // describeLoadBalancers walks every page of load balancers in the region. Both
 // the load balancer list and the target group list need them, and paging twice
 // against the same API is the kind of duplication that drifts.
-func describeLoadBalancers(ctx context.Context, api LoadBalancerAPI) ([]elbtypes.LoadBalancer, error) {
+func describeLoadBalancers(ctx context.Context, api LoadBalancerAPI) ([]elbtypes.LoadBalancer, bool, error) {
 	var out []elbtypes.LoadBalancer
 	var in elasticloadbalancingv2.DescribeLoadBalancersInput
 	for page := 0; page < maxDiscoveryPages; page++ {
 		resp, err := api.DescribeLoadBalancers(ctx, &in)
 		if err != nil {
-			return nil, fmt.Errorf("DescribeLoadBalancers: %w", err)
+			return nil, false, fmt.Errorf("DescribeLoadBalancers: %w", err)
 		}
 		out = append(out, resp.LoadBalancers...)
 		if resp.NextMarker == nil || *resp.NextMarker == "" {
-			break
+			return out, false, nil
 		}
 		in.Marker = resp.NextMarker
 	}
-	return out, nil
+	return out, true, nil
 }
 
 // LoadBalancers lists the load balancers in the region.
@@ -65,10 +84,10 @@ func describeLoadBalancers(ctx context.Context, api LoadBalancerAPI) ([]elbtypes
 // in the settings page writes something the metric SEARCH can actually use. An
 // ARN pasted into that field passes the value regex and then matches nothing,
 // which is why the list exists at all.
-func LoadBalancers(ctx context.Context, api LoadBalancerAPI) ([]Resource, error) {
-	lbs, err := describeLoadBalancers(ctx, api)
+func LoadBalancers(ctx context.Context, api LoadBalancerAPI) (Listing, error) {
+	lbs, truncated, err := describeLoadBalancers(ctx, api)
 	if err != nil {
-		return nil, err
+		return Listing{}, err
 	}
 
 	out := make([]Resource, 0, len(lbs))
@@ -85,54 +104,86 @@ func LoadBalancers(ctx context.Context, api LoadBalancerAPI) ([]Resource, error)
 			},
 		})
 	}
-	return sortResources(out), nil
+	return sorted(out, truncated), nil
 }
 
 // TargetGroups lists the target groups in the region, annotated with the load
 // balancer each one is attached to.
-func TargetGroups(ctx context.Context, api LoadBalancerAPI) ([]Resource, error) {
-	lbs, err := describeLoadBalancers(ctx, api)
-	if err != nil {
-		return nil, err
+//
+// The two walks run at the same time. They are independent — the load balancer
+// list is only consumed at the end, to put a name on each group's ARN — and
+// with one target group per application the list is long enough that doing them
+// in sequence is felt: the settings button spends the sum of the two rather
+// than the longer of them. Neither goroutine cancels the other on failure;
+// both are bounded by the caller's deadline and each is a single call chain, so
+// a cancel tree would buy less than it costs to read.
+func TargetGroups(ctx context.Context, api LoadBalancerAPI) (Listing, error) {
+	var (
+		wg          sync.WaitGroup
+		lbs         []elbtypes.LoadBalancer
+		lbTruncated bool
+		lbErr       error
+
+		groups      []elbtypes.TargetGroup
+		tgTruncated bool
+		tgErr       error
+	)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		lbs, lbTruncated, lbErr = describeLoadBalancers(ctx, api)
+	}()
+	go func() {
+		defer wg.Done()
+		var in elasticloadbalancingv2.DescribeTargetGroupsInput
+		for page := 0; page < maxDiscoveryPages; page++ {
+			resp, err := api.DescribeTargetGroups(ctx, &in)
+			if err != nil {
+				tgErr = fmt.Errorf("DescribeTargetGroups: %w", err)
+				return
+			}
+			groups = append(groups, resp.TargetGroups...)
+			if resp.NextMarker == nil || *resp.NextMarker == "" {
+				return
+			}
+			in.Marker = resp.NextMarker
+		}
+		tgTruncated = true
+	}()
+	wg.Wait()
+
+	if err := errors.Join(lbErr, tgErr); err != nil {
+		return Listing{}, err
 	}
+
 	lbNames := make(map[string]string, len(lbs))
 	for _, lb := range lbs {
 		lbNames[aws.ToString(lb.LoadBalancerArn)] = aws.ToString(lb.LoadBalancerName)
 	}
 
-	var out []Resource
-	var in elasticloadbalancingv2.DescribeTargetGroupsInput
-	for page := 0; page < maxDiscoveryPages; page++ {
-		resp, err := api.DescribeTargetGroups(ctx, &in)
-		if err != nil {
-			return nil, fmt.Errorf("DescribeTargetGroups: %w", err)
+	out := make([]Resource, 0, len(groups))
+	for _, tg := range groups {
+		arn := aws.ToString(tg.TargetGroupArn)
+		name := aws.ToString(tg.TargetGroupName)
+		r := Resource{
+			ID:    domain.TargetGroupDimension(arn),
+			Name:  name,
+			ARN:   arn,
+			Extra: map[string]string{"friendlyName": domain.FriendlyTargetGroupName(name)},
 		}
-		for _, tg := range resp.TargetGroups {
-			arn := aws.ToString(tg.TargetGroupArn)
-			name := aws.ToString(tg.TargetGroupName)
-			r := Resource{
-				ID:    domain.TargetGroupDimension(arn),
-				Name:  name,
-				ARN:   arn,
-				Extra: map[string]string{"friendlyName": domain.FriendlyTargetGroupName(name)},
-			}
-			if len(tg.LoadBalancerArns) > 0 {
-				lbArn := tg.LoadBalancerArns[0]
-				r.Extra["loadBalancer"] = domain.LoadBalancerDimension(lbArn)
-				r.Extra["loadBalancerName"] = lbNames[lbArn]
-			}
-			out = append(out, r)
+		if len(tg.LoadBalancerArns) > 0 {
+			lbArn := tg.LoadBalancerArns[0]
+			r.Extra["loadBalancer"] = domain.LoadBalancerDimension(lbArn)
+			r.Extra["loadBalancerName"] = lbNames[lbArn]
 		}
-		if resp.NextMarker == nil || *resp.NextMarker == "" {
-			break
-		}
-		in.Marker = resp.NextMarker
+		out = append(out, r)
 	}
-	return sortResources(out), nil
+	return sorted(out, lbTruncated || tgTruncated), nil
 }
 
 // LogGroups lists log groups whose name starts with prefix.
-func LogGroups(ctx context.Context, api LogGroupsAPI, prefix string) ([]Resource, error) {
+func LogGroups(ctx context.Context, api LogGroupsAPI, prefix string) (Listing, error) {
 	in := &cloudwatchlogs.DescribeLogGroupsInput{Limit: aws.Int32(50)}
 	if prefix != "" {
 		in.LogGroupNamePrefix = aws.String(prefix)
@@ -142,28 +193,28 @@ func LogGroups(ctx context.Context, api LogGroupsAPI, prefix string) ([]Resource
 	for page := 0; page < maxDiscoveryPages; page++ {
 		resp, err := api.DescribeLogGroups(ctx, in)
 		if err != nil {
-			return nil, fmt.Errorf("DescribeLogGroups: %w", err)
+			return Listing{}, fmt.Errorf("DescribeLogGroups: %w", err)
 		}
 		for _, lg := range resp.LogGroups {
 			name := aws.ToString(lg.LogGroupName)
 			out = append(out, Resource{ID: name, Name: name, ARN: aws.ToString(lg.Arn)})
 		}
 		if resp.NextToken == nil || *resp.NextToken == "" {
-			break
+			return sorted(out, false), nil
 		}
 		in.NextToken = resp.NextToken
 	}
-	return sortResources(out), nil
+	return sorted(out, true), nil
 }
 
 // RDSProxies lists the RDS proxies in the region.
-func RDSProxies(ctx context.Context, api ProxyAPI) ([]Resource, error) {
+func RDSProxies(ctx context.Context, api ProxyAPI) (Listing, error) {
 	var out []Resource
 	var in rds.DescribeDBProxiesInput
 	for page := 0; page < maxDiscoveryPages; page++ {
 		resp, err := api.DescribeDBProxies(ctx, &in)
 		if err != nil {
-			return nil, fmt.Errorf("DescribeDBProxies: %w", err)
+			return Listing{}, fmt.Errorf("DescribeDBProxies: %w", err)
 		}
 		for _, p := range resp.DBProxies {
 			name := aws.ToString(p.DBProxyName)
@@ -175,22 +226,22 @@ func RDSProxies(ctx context.Context, api ProxyAPI) ([]Resource, error) {
 			})
 		}
 		if resp.Marker == nil || *resp.Marker == "" {
-			break
+			return sorted(out, false), nil
 		}
 		in.Marker = resp.Marker
 	}
-	return sortResources(out), nil
+	return sorted(out, true), nil
 }
 
 // WebACLs lists web ACLs for one scope. REGIONAL ACLs live in the working
 // region; CLOUDFRONT ACLs only exist in us-east-1.
-func WebACLs(ctx context.Context, api WAFAPI, scope waftypes.Scope) ([]Resource, error) {
+func WebACLs(ctx context.Context, api WAFAPI, scope waftypes.Scope) (Listing, error) {
 	var out []Resource
 	in := &wafv2.ListWebACLsInput{Scope: scope, Limit: aws.Int32(100)}
 	for page := 0; page < maxDiscoveryPages; page++ {
 		resp, err := api.ListWebACLs(ctx, in)
 		if err != nil {
-			return nil, fmt.Errorf("ListWebACLs(%s): %w", scope, err)
+			return Listing{}, fmt.Errorf("ListWebACLs(%s): %w", scope, err)
 		}
 		for _, acl := range resp.WebACLs {
 			name := aws.ToString(acl.Name)
@@ -202,21 +253,21 @@ func WebACLs(ctx context.Context, api WAFAPI, scope waftypes.Scope) ([]Resource,
 			})
 		}
 		if resp.NextMarker == nil || *resp.NextMarker == "" {
-			break
+			return sorted(out, false), nil
 		}
 		in.NextMarker = resp.NextMarker
 	}
-	return sortResources(out), nil
+	return sorted(out, true), nil
 }
 
 // Clusters lists EKS clusters.
-func Clusters(ctx context.Context, api ClusterAPI) ([]Resource, error) {
+func Clusters(ctx context.Context, api ClusterAPI) (Listing, error) {
 	var out []Resource
 	var in eks.ListClustersInput
 	for page := 0; page < maxDiscoveryPages; page++ {
 		resp, err := api.ListClusters(ctx, &in)
 		if err != nil {
-			return nil, fmt.Errorf("ListClusters: %w", err)
+			return Listing{}, fmt.Errorf("ListClusters: %w", err)
 		}
 		for _, name := range resp.Clusters {
 			out = append(out, Resource{
@@ -226,11 +277,11 @@ func Clusters(ctx context.Context, api ClusterAPI) ([]Resource, error) {
 			})
 		}
 		if resp.NextToken == nil || *resp.NextToken == "" {
-			break
+			return sorted(out, false), nil
 		}
 		in.NextToken = resp.NextToken
 	}
-	return sortResources(out), nil
+	return sorted(out, true), nil
 }
 
 // NodeScaling is a cluster's node count limits, summed across its node groups.

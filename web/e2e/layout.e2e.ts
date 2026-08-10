@@ -308,6 +308,116 @@ test('the load balancer is offered as a dimension, not an ARN', async ({ page })
 	await expect(lb).toHaveValue('app/my-alb/50dc6c495c0c9188');
 });
 
+/**
+ * Discovery outcomes.
+ *
+ * Four different things used to render as the same empty space under a label:
+ * a lookup nobody ran, a lookup that found nothing, a lookup that failed, and
+ * a list that was cut short. Two of the three resource fields had no error line
+ * at all, so an AccessDenied repainted the page exactly as it had been. These
+ * tests hold each outcome to saying something distinct.
+ */
+
+/** Presses 자동 조회 in the field carrying the given label. */
+function pickerFor(page: Page, label: string) {
+	return page.locator('.field').filter({ has: page.getByText(label, { exact: true }) });
+}
+
+test('a lookup that found nothing says so rather than showing an empty list', async ({ page }) => {
+	await mockApi(page);
+	await page.route('**/api/discovery/rdsproxies*', (route) =>
+		route.fulfill({
+			status: 200,
+			contentType: 'application/json',
+			body: JSON.stringify({ kind: 'rdsproxies', resources: [] })
+		})
+	);
+	await page.goto('/settings');
+	await expect(page.locator('h1')).toBeVisible();
+
+	const field = pickerFor(page, 'RDS Proxy');
+	await field.getByRole('button', { name: '자동 조회' }).click();
+	await expect(field.getByText(/이 리전에 RDS Proxy이\(가\) 없습니다/)).toBeVisible();
+});
+
+test('a failed lookup is reported for every resource, not just target groups', async ({ page }) => {
+	await mockApi(page);
+	await page.route('**/api/discovery/webacls*', (route) =>
+		route.fulfill({
+			status: 502,
+			contentType: 'application/json',
+			body: JSON.stringify({
+				error: 'Bad Gateway',
+				detail: 'ListWebACLs(REGIONAL): AccessDeniedException',
+				hint: '권한을 확인하세요.'
+			})
+		})
+	);
+	await page.goto('/settings');
+	await expect(page.locator('h1')).toBeVisible();
+
+	const field = pickerFor(page, 'Web ACL');
+	await field.getByRole('button', { name: '자동 조회' }).click();
+	await expect(field.getByText(/AccessDeniedException/)).toBeVisible();
+});
+
+test('a discarded scope is reported beside the results it did not stop', async ({ page }) => {
+	await mockApi(page);
+	await page.route('**/api/discovery/webacls*', (route) =>
+		route.fulfill({
+			status: 200,
+			contentType: 'application/json',
+			body: JSON.stringify({
+				kind: 'webacls',
+				resources: [{ id: 'skills-waf', name: 'skills-waf', extra: { scope: 'REGIONAL' } }],
+				partial: ['CLOUDFRONT 스코프 조회 실패: AccessDeniedException']
+			})
+		})
+	);
+	await page.goto('/settings');
+	await expect(page.locator('h1')).toBeVisible();
+
+	const field = pickerFor(page, 'Web ACL');
+	await field.getByRole('button', { name: '자동 조회' }).click();
+	await expect(field.getByText(/CLOUDFRONT 스코프 조회 실패/)).toBeVisible();
+	// The regional ACL the operator can actually use is still offered.
+	await expect(field.getByText('skills-waf', { exact: true })).toBeVisible();
+});
+
+// One target group per application makes this list long, and it is the only
+// part of the settings page the layout suite never measured: `open()` does not
+// press any button, so the populated list was invisible to every other check.
+test('nothing clips once the target group list is populated', async ({ page }) => {
+	await open(page, '/settings');
+	const field = pickerFor(page, '타겟 그룹');
+	await field.getByRole('button', { name: '자동 조회' }).click();
+	await expect(field.getByText('checkout', { exact: true })).toBeVisible();
+
+	const clipped = await clippedElements(page);
+	expect(clipped, `clipped values: ${JSON.stringify(clipped, null, 2)}`).toEqual([]);
+	expect(await ellipsisedValues(page)).toEqual([]);
+});
+
+test('target groups are grouped by load balancer and named by application', async ({ page }) => {
+	await open(page, '/settings');
+	const field = pickerFor(page, '타겟 그룹');
+	await field.getByRole('button', { name: '자동 조회' }).click();
+
+	// The heading is the load balancer; the row is the application.
+	await expect(field.getByText('my-alb', { exact: true })).toBeVisible();
+	await expect(field.getByText('internal-alb', { exact: true })).toBeVisible();
+	await expect(field.getByText('checkout', { exact: true })).toBeVisible();
+	await expect(field.getByText('admin', { exact: true })).toBeVisible();
+
+	// The generated dimension is kept in full beside the application name: two
+	// namespaces can host the same application, and the name alone cannot tell
+	// them apart.
+	const dimension = 'targetgroup/k8s-default-checkout-d6d507c878/1a2b3c4d5e6f7890';
+	const shown = field.getByText(dimension, { exact: true });
+	await expect(shown).toBeVisible();
+	expect((await shown.textContent())?.trim()).toBe(dimension);
+});
+
 // A repaired config starts the dashboard but leaves a field blank. An empty
 // field with no explanation is the same as a resource that has no traffic.
 test('a value dropped from the stored config is explained on the settings page', async ({

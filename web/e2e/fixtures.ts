@@ -421,8 +421,70 @@ const discoveries: Record<string, unknown[]> = {
 			arn: 'arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:loadbalancer/app/my-alb/50dc6c495c0c9188',
 			extra: { type: 'application', scheme: 'internet-facing' }
 		}
+	],
+	// One target group per application, across two load balancers, because that
+	// is the shape the settings page has to stay readable in. `payments` carries
+	// a deliberately long name: a layout defect shows on the longest string.
+	targetgroups: [
+		targetGroup('checkout', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
+		targetGroup('cart', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
+		targetGroup('search', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
+		targetGroup('product-catalogue', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
+		targetGroup('notifications', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
+		targetGroup('media', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
+		targetGroup('auth', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
+		targetGroup('billing', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
+		targetGroup('payments-settlement-reconciliation', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
+		targetGroup('admin', 'internal-alb', 'app/internal-alb/9f2b1c0d4e5a6789'),
+		targetGroup('batch', 'internal-alb', 'app/internal-alb/9f2b1c0d4e5a6789'),
+		// Registered with no load balancer, so it publishes no ApplicationELB
+		// metrics. It is listed anyway, last, rather than hidden.
+		{
+			id: 'targetgroup/k8s-default-unattached-8f8f8f8f8f/000',
+			name: 'k8s-default-unattached-8f8f8f8f8f',
+			extra: { friendlyName: 'unattached' }
+		}
+	],
+	rdsproxies: [
+		{
+			id: 'app-proxy',
+			name: 'app-proxy',
+			arn: 'arn:aws:rds:ap-northeast-2:123456789012:db-proxy/app-proxy',
+			extra: { engine: 'POSTGRESQL', status: 'available' }
+		},
+		{
+			id: 'reporting-proxy',
+			name: 'reporting-proxy',
+			arn: 'arn:aws:rds:ap-northeast-2:123456789012:db-proxy/reporting-proxy',
+			extra: { engine: 'MYSQL', status: 'available' }
+		}
+	],
+	webacls: [
+		{
+			id: 'skills-waf',
+			name: 'skills-waf',
+			arn: 'arn:aws:wafv2:ap-northeast-2:123456789012:regional/webacl/skills-waf/1',
+			extra: { scope: 'REGIONAL', id: 'acl-1' }
+		},
+		{
+			id: 'edge-waf',
+			name: 'edge-waf',
+			arn: 'arn:aws:wafv2:us-east-1:123456789012:global/webacl/edge-waf/2',
+			extra: { scope: 'CLOUDFRONT', id: 'acl-2' }
+		}
 	]
 };
+
+/** One Kubernetes-managed target group, as discovery hands it over. */
+function targetGroup(app: string, lbName: string, lbDimension: string) {
+	const name = `k8s-default-${app}-d6d507c878`;
+	return {
+		id: `targetgroup/${name}/1a2b3c4d5e6f7890`,
+		name,
+		arn: `arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/${name}/1a2b3c4d5e6f7890`,
+		extra: { friendlyName: app, loadBalancer: lbDimension, loadBalancerName: lbName }
+	};
+}
 
 const config = {
 	region: 'ap-northeast-2',
@@ -479,7 +541,10 @@ export async function mockApi(page: Page) {
 
 		if (path.startsWith('/api/discovery/')) {
 			const kind = path.split('/').pop() ?? '';
-			return json({ kind, resources: discoveries[kind] ?? discoveries.clusters });
+			// An unknown kind answers empty rather than borrowing the cluster
+			// list. Standing in for a missing fixture is how pressing 자동 조회
+			// under 타겟 그룹 came to render a cluster.
+			return json({ kind, resources: discoveries[kind] ?? [] });
 		}
 
 		if (path === '/api/logfmt/preview') {

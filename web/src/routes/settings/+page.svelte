@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { api, ApiFailure } from '$lib/api';
-	import type { Config, Identity, LogFormatPreview, Resource } from '$lib/types';
+	import type { Config, DiscoveryResponse, Identity, LogFormatPreview, Resource } from '$lib/types';
+	import { appName } from '$lib/resources';
 	import CopyValue from '$lib/components/CopyValue.svelte';
+	import ResourcePicker from '$lib/components/ResourcePicker.svelte';
 
 	/**
 	 * Settings: what the dashboard watches, and how it reads a log line.
@@ -24,7 +26,14 @@
 	let saved = $state(false);
 	let saveError = $state('');
 
-	let discovered = $state<Record<string, Resource[]>>({});
+	/**
+	 * What each 자동 조회 produced, keyed by kind.
+	 *
+	 * A kind that is absent has never been looked up; a kind whose `resources`
+	 * is empty was looked up and found nothing. Those are different things and
+	 * the page says so differently, so the two are never collapsed into one.
+	 */
+	let discovered = $state<Record<string, DiscoveryResponse>>({});
 	let discovering = $state<Record<string, boolean>>({});
 	let discoveryError = $state<Record<string, string>>({});
 
@@ -52,7 +61,7 @@
 		discoveryError = { ...discoveryError, [kind]: '' };
 		try {
 			const res = await api.discover(kind, prefix);
-			discovered = { ...discovered, [kind]: res.resources };
+			discovered = { ...discovered, [kind]: res };
 		} catch (e) {
 			const msg = e instanceof ApiFailure ? e.message : String(e);
 			discoveryError = { ...discoveryError, [kind]: msg };
@@ -63,6 +72,17 @@
 
 	function toggle(list: string[], id: string): string[] {
 		return list.includes(id) ? list.filter((x) => x !== id) : [...list, id];
+	}
+
+	/**
+	 * What a lookup that found nothing says.
+	 *
+	 * Saying it at all is the point: an empty result used to render as empty
+	 * space, which is also what a lookup nobody ran looks like, and what a
+	 * lookup that failed looked like on the fields with no error line.
+	 */
+	function emptyFor(noun: string): string {
+		return `조회했지만 이 리전에 ${noun}이(가) 없습니다. 리전과 IAM 권한을 확인하세요.`;
 	}
 
 	async function save() {
@@ -168,9 +188,9 @@ AWS_REGION=ap-northeast-2</pre>
 				{#if discoveryError.clusters}
 					<p class="warning tiny" data-value>{discoveryError.clusters}</p>
 				{/if}
-				{#if discovered.clusters?.length}
+				{#if discovered.clusters?.resources.length}
 					<ul class="chips">
-						{#each discovered.clusters as r (r.id)}
+						{#each discovered.clusters.resources as r (r.id)}
 							<li>
 								<button type="button" class="chip" onclick={() => selectCluster(r)}>
 									<span data-value>{r.name}</span>
@@ -178,6 +198,8 @@ AWS_REGION=ap-northeast-2</pre>
 							</li>
 						{/each}
 					</ul>
+				{:else if discovered.clusters}
+					<p class="tiny muted" data-value>{emptyFor('EKS 클러스터')}</p>
 				{/if}
 			</div>
 
@@ -202,9 +224,9 @@ AWS_REGION=ap-northeast-2</pre>
 				{#if discoveryError.loggroups}
 					<p class="warning tiny" data-value>{discoveryError.loggroups}</p>
 				{/if}
-				{#if discovered.loggroups?.length}
+				{#if discovered.loggroups?.resources.length}
 					<ul class="chips">
-						{#each discovered.loggroups as r (r.id)}
+						{#each discovered.loggroups.resources as r (r.id)}
 							<li>
 								<button type="button" class="chip" onclick={() => (config!.podLogGroup = r.id)}>
 									<span data-value class="mono">{r.name}</span>
@@ -212,6 +234,10 @@ AWS_REGION=ap-northeast-2</pre>
 							</li>
 						{/each}
 					</ul>
+				{:else if discovered.loggroups}
+					<p class="tiny muted" data-value>
+						{emptyFor('/aws/containerinsights/ 로 시작하는 로그 그룹')}
+					</p>
 				{/if}
 			</div>
 
@@ -235,9 +261,9 @@ AWS_REGION=ap-northeast-2</pre>
 				{#if discoveryError['waf-loggroups']}
 					<p class="warning tiny" data-value>{discoveryError['waf-loggroups']}</p>
 				{/if}
-				{#if discovered['waf-loggroups']?.length}
+				{#if discovered['waf-loggroups']?.resources.length}
 					<ul class="chips">
-						{#each discovered['waf-loggroups'] as r (r.id)}
+						{#each discovered['waf-loggroups'].resources as r (r.id)}
 							<li>
 								<button type="button" class="chip" onclick={() => (config!.wafLogGroup = r.id)}>
 									<span data-value class="mono">{r.name}</span>
@@ -245,6 +271,11 @@ AWS_REGION=ap-northeast-2</pre>
 							</li>
 						{/each}
 					</ul>
+				{:else if discovered['waf-loggroups']}
+					<p class="tiny muted" data-value>
+						{identity?.wafRegion ?? config.wafRegion} 에 aws-waf-logs- 로 시작하는 로그 그룹이 없습니다.
+						WAF 로깅이 켜져 있는지 확인하세요.
+					</p>
 				{/if}
 				<p class="tiny muted" data-value>
 					CLOUDFRONT 스코프 WAF는 {identity?.wafRegion ?? config.wafRegion} 에만 로그를 남깁니다. 이 목록도
@@ -268,9 +299,9 @@ AWS_REGION=ap-northeast-2</pre>
 				{#if discoveryError.loadbalancers}
 					<p class="warning tiny" data-value>{discoveryError.loadbalancers}</p>
 				{/if}
-				{#if discovered.loadbalancers?.length}
+				{#if discovered.loadbalancers?.resources.length}
 					<ul class="chips">
-						{#each discovered.loadbalancers as r (r.id)}
+						{#each discovered.loadbalancers.resources as r (r.id)}
 							<li>
 								<button type="button" class="chip" onclick={() => (config!.loadBalancer = r.id)}>
 									<span data-value>{r.name}</span>
@@ -279,93 +310,70 @@ AWS_REGION=ap-northeast-2</pre>
 							</li>
 						{/each}
 					</ul>
+				{:else if discovered.loadbalancers}
+					<p class="tiny muted" data-value>{emptyFor('로드 밸런서')}</p>
 				{/if}
 				<p class="tiny muted" data-value>
 					ARN이 아니라 ARN의 뒤쪽 경로입니다. 전체 ARN을 붙여넣으면 저장할 때 변환합니다.
 				</p>
+				<p class="tiny muted" data-value>
+					타겟 그룹별 지표는 이 값과 무관하게 조회됩니다. 이 값은 타겟 그룹을 하나도 고르지 않았을
+					때 로드 밸런서 전체 지표를 보여주는 데만 쓰입니다.
+				</p>
 			</div>
 
-			<div class="field">
-				<div class="row">
-					<span class="label-text">타겟 그룹</span>
-					<button type="button" class="control" onclick={() => discover('targetgroups')}>
-						{discovering.targetgroups ? '조회 중…' : '자동 조회'}
-					</button>
-				</div>
-				{#if discoveryError.targetgroups}
-					<p class="warning tiny" data-value>{discoveryError.targetgroups}</p>
-				{/if}
-				{#each discovered.targetgroups ?? [] as r (r.id)}
-					<label class="check">
-						<input
-							type="checkbox"
-							checked={config.targetGroups.includes(r.id)}
-							onchange={() => {
-								config!.targetGroups = toggle(config!.targetGroups, r.id);
-								if (r.extra?.loadBalancer && !config!.loadBalancer) {
-									config!.loadBalancer = r.extra.loadBalancer;
-								}
-							}}
-						/>
-						<span data-value>{r.extra?.friendlyName ?? r.name}</span>
-						<span class="tiny muted mono" data-value>{r.id}</span>
-					</label>
-				{/each}
-				{#each config.targetGroups as tg (tg)}
-					{#if !(discovered.targetgroups ?? []).some((r) => r.id === tg)}
-						<div class="row selected">
-							<CopyValue value={tg} mono label="타겟 그룹" />
-							<button
-								type="button"
-								class="control tiny"
-								onclick={() => (config!.targetGroups = toggle(config!.targetGroups, tg))}
-							>
-								제거
-							</button>
-						</div>
-					{/if}
-				{/each}
-			</div>
+			<ResourcePicker
+				label="타겟 그룹"
+				noun="타겟 그룹"
+				grouped
+				resources={discovered.targetgroups?.resources}
+				truncated={discovered.targetgroups?.truncated}
+				partial={discovered.targetgroups?.partial}
+				selected={config.targetGroups}
+				loading={discovering.targetgroups ?? false}
+				error={discoveryError.targetgroups ?? ''}
+				nameOf={appName}
+				detailOf={(r) => r.id}
+				idleHint="자동 조회를 눌러 이 리전의 타겟 그룹을 로드 밸런서별로 가져옵니다."
+				onDiscover={() => discover('targetgroups')}
+				onToggle={(r) => {
+					config!.targetGroups = toggle(config!.targetGroups, r.id);
+					if (r.extra?.loadBalancer && !config!.loadBalancer) {
+						config!.loadBalancer = r.extra.loadBalancer;
+					}
+				}}
+				onRemove={(id) => (config!.targetGroups = toggle(config!.targetGroups, id))}
+			/>
 
-			<div class="field">
-				<div class="row">
-					<span class="label-text">RDS Proxy</span>
-					<button type="button" class="control" onclick={() => discover('rdsproxies')}>
-						{discovering.rdsproxies ? '조회 중…' : '자동 조회'}
-					</button>
-				</div>
-				{#each discovered.rdsproxies ?? [] as r (r.id)}
-					<label class="check">
-						<input
-							type="checkbox"
-							checked={config.rdsProxies.includes(r.id)}
-							onchange={() => (config!.rdsProxies = toggle(config!.rdsProxies, r.id))}
-						/>
-						<span data-value>{r.name}</span>
-						<span class="tiny muted" data-value>{r.extra?.engine ?? ''}</span>
-					</label>
-				{/each}
-			</div>
+			<ResourcePicker
+				label="RDS Proxy"
+				noun="RDS Proxy"
+				resources={discovered.rdsproxies?.resources}
+				truncated={discovered.rdsproxies?.truncated}
+				partial={discovered.rdsproxies?.partial}
+				selected={config.rdsProxies}
+				loading={discovering.rdsproxies ?? false}
+				error={discoveryError.rdsproxies ?? ''}
+				detailOf={(r) => r.extra?.engine ?? ''}
+				onDiscover={() => discover('rdsproxies')}
+				onToggle={(r) => (config!.rdsProxies = toggle(config!.rdsProxies, r.id))}
+				onRemove={(id) => (config!.rdsProxies = toggle(config!.rdsProxies, id))}
+			/>
 
-			<div class="field">
-				<div class="row">
-					<span class="label-text">Web ACL</span>
-					<button type="button" class="control" onclick={() => discover('webacls')}>
-						{discovering.webacls ? '조회 중…' : '자동 조회'}
-					</button>
-				</div>
-				{#each discovered.webacls ?? [] as r (r.id + (r.extra?.scope ?? ''))}
-					<label class="check">
-						<input
-							type="checkbox"
-							checked={config.webAcls.includes(r.id)}
-							onchange={() => (config!.webAcls = toggle(config!.webAcls, r.id))}
-						/>
-						<span data-value>{r.name}</span>
-						<span class="tiny muted" data-value>{r.extra?.scope ?? ''}</span>
-					</label>
-				{/each}
-			</div>
+			<ResourcePicker
+				label="Web ACL"
+				noun="Web ACL"
+				resources={discovered.webacls?.resources}
+				truncated={discovered.webacls?.truncated}
+				partial={discovered.webacls?.partial}
+				selected={config.webAcls}
+				loading={discovering.webacls ?? false}
+				error={discoveryError.webacls ?? ''}
+				detailOf={(r) => r.extra?.scope ?? ''}
+				onDiscover={() => discover('webacls')}
+				onToggle={(r) => (config!.webAcls = toggle(config!.webAcls, r.id))}
+				onRemove={(id) => (config!.webAcls = toggle(config!.webAcls, id))}
+			/>
 		</section>
 
 		<!-- Log format -->
@@ -544,8 +552,7 @@ AWS_REGION=ap-northeast-2</pre>
 		grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
 	}
 
-	label,
-	.label-text {
+	label {
 		font-size: 12.5px;
 		font-weight: 600;
 		color: var(--label-secondary);
@@ -562,17 +569,6 @@ AWS_REGION=ap-northeast-2</pre>
 		/* A pasted log line wraps; it is never cut off. */
 		white-space: pre-wrap;
 		overflow-wrap: anywhere;
-	}
-
-	.check {
-		display: flex;
-		align-items: baseline;
-		gap: 8px;
-		flex-wrap: wrap;
-		padding: 3px 0;
-		font-weight: 400;
-		font-size: 13px;
-		color: var(--label-primary);
 	}
 
 	/* One line per discarded value, indented under the sentence that explains
@@ -638,10 +634,6 @@ AWS_REGION=ap-northeast-2</pre>
 		padding: 12px;
 		border-radius: var(--radius-control);
 		background: var(--fill-secondary);
-	}
-
-	.selected {
-		gap: 8px;
 	}
 
 	.actions {

@@ -104,9 +104,28 @@ func (s *Service) handleLogFormatPreview(w http.ResponseWriter, r *http.Request)
 }
 
 type discoveryResponse struct {
-	Kind      string            `json:"kind"`
-	Resources []awsx.Resource   `json:"resources"`
-	Scaling   *awsx.NodeScaling `json:"scaling,omitempty"`
+	Kind      string          `json:"kind"`
+	Resources []awsx.Resource `json:"resources"`
+	// Truncated reports that the page cap was reached with pages still waiting,
+	// so the resource the operator is hunting for may simply not be on the list.
+	Truncated bool `json:"truncated,omitempty"`
+	// ElapsedMs is how long the listing took, so a settings page that felt slow
+	// can say whether it actually was. Absent when the cache answered.
+	ElapsedMs int64 `json:"elapsedMs,omitempty"`
+	// Partial names a scope that failed without failing the whole call. Today
+	// only the CLOUDFRONT web ACL listing, which is discarded so a missing
+	// permission cannot hide the regional ACLs the operator can actually use —
+	// discarding it in silence is how "this account has no web ACLs" came to be
+	// said on the strength of one denied call.
+	Partial []string `json:"partial,omitempty"`
+}
+
+// discoveryResult is what one listing produced, before it becomes a response.
+// It is what the cache stores, so a cached answer keeps its caveats.
+type discoveryResult struct {
+	Resources []awsx.Resource
+	Truncated bool
+	Partial   []string
 }
 
 func (s *Service) handleDiscovery(w http.ResponseWriter, r *http.Request) {
@@ -114,76 +133,165 @@ func (s *Service) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind := r.PathValue("kind")
+	prefix := r.URL.Query().Get("prefix")
 
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	// A start line, so a request that never comes back still leaves a trace of
+	// having arrived. Without it, "the button did nothing" cannot be told apart
+	// from "the request never reached the server".
+	s.log().Debug("discovery requested", "kind", kind, "prefix", prefix)
+
+	ctx, cancel := context.WithTimeout(r.Context(), discoveryTimeout)
 	defer cancel()
 
-	resources, err := s.discover(ctx, kind, r.URL.Query().Get("prefix"))
+	started := time.Now()
+	res, err := s.discover(ctx, kind, prefix)
 	if err != nil {
 		if err == errUnknownKind {
 			badRequest(w, fmt.Errorf("unknown discovery kind %q", kind))
 			return
 		}
+		// Under retry-then-cancel the SDK reports "context deadline exceeded",
+		// which reads as a broken dashboard rather than as a throttled or
+		// unreachable account. Say which one it was.
+		if ctx.Err() != nil {
+			upstream(w, fmt.Errorf(
+				"AWS 응답이 %d초 안에 오지 않았습니다 (재시도 중 취소됨). 계정이 스로틀링되고 있는지, 네트워크에서 AWS 엔드포인트에 닿는지 확인하세요: %w",
+				int(discoveryTimeout.Seconds()), err))
+			return
+		}
 		upstream(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, discoveryResponse{Kind: kind, Resources: resources})
+	writeJSON(w, http.StatusOK, discoveryResponse{
+		Kind:      kind,
+		Resources: res.Resources,
+		Truncated: res.Truncated,
+		ElapsedMs: time.Since(started).Milliseconds(),
+		Partial:   res.Partial,
+	})
 }
+
+// discoveryTimeout bounds one listing.
+//
+// The SDK's retry policy (five attempts, up to fifteen seconds of backoff) can
+// outlast this on a sustained throttle, so a slow account will be cut off
+// mid-retry rather than allowed to finish. That is the intended trade: a
+// settings button that can sit silent for over a minute is worse than one that
+// gives up at thirty seconds and says why.
+const discoveryTimeout = 30 * time.Second
 
 var errUnknownKind = fmt.Errorf("unknown discovery kind")
 
-func (s *Service) discover(ctx context.Context, kind, prefix string) ([]awsx.Resource, error) {
+// cachedDiscovery runs one listing behind the cache and leaves a record of what
+// it cost.
+//
+// Discovery is the first thing an operator points at when a resource does not
+// appear on the settings page, and until now it left no trace whatsoever: a
+// call that failed, a call that succeeded and found nothing, and a call that
+// was never made because the cache answered were indistinguishable from
+// outside the process. The log line goes inside the loader on purpose — the
+// loader runs only on a miss, so a request that prints nothing was served from
+// memory, and that distinction costs nothing to record.
+func (s *Service) cachedDiscovery(
+	ctx context.Context,
+	key, kind, prefix string,
+	load func(context.Context) (discoveryResult, error),
+) (discoveryResult, error) {
+	return awsx.Cached(ctx, s.Cache, key, func(ctx context.Context) (discoveryResult, error) {
+		// Wall-clock, not s.now(): that one is pinned to a fixed instant in
+		// tests, and this measures how long a call took rather than when it
+		// happened.
+		started := time.Now()
+		res, err := load(ctx)
+		elapsed := time.Since(started).Milliseconds()
+		if err != nil {
+			s.log().Warn("discovery failed", "kind", kind, "prefix", prefix,
+				"region", s.region(), "wafRegion", s.wafRegion(),
+				"elapsedMs", elapsed, "error", err)
+			return discoveryResult{}, err
+		}
+		s.log().Info("discovery listed", "kind", kind, "prefix", prefix,
+			"region", s.region(), "wafRegion", s.wafRegion(),
+			"count", len(res.Resources), "truncated", res.Truncated,
+			"partial", len(res.Partial), "elapsedMs", elapsed)
+		return res, nil
+	})
+}
+
+// listing adapts an awsx walk to a discoveryResult.
+func listing(l awsx.Listing, err error) (discoveryResult, error) {
+	if err != nil {
+		return discoveryResult{}, err
+	}
+	return discoveryResult{Resources: l.Resources, Truncated: l.Truncated}, nil
+}
+
+func (s *Service) discover(ctx context.Context, kind, prefix string) (discoveryResult, error) {
 	// The key names the regions the clients are pointed at rather than the one
 	// the config records, which is a note about the credentials and does not
 	// decide where a call lands. A listing from us-east-1 and one from the
 	// working region must not be able to answer for each other.
 	key := "discovery|" + kind + "|" + prefix + "|" + s.region() + "|" + s.wafRegion()
+	run := func(load func(context.Context) (discoveryResult, error)) (discoveryResult, error) {
+		return s.cachedDiscovery(ctx, key, kind, prefix, load)
+	}
+
 	switch kind {
 	case "targetgroups":
-		return awsx.Cached(ctx, s.Cache, key, func(ctx context.Context) ([]awsx.Resource, error) {
-			return awsx.TargetGroups(ctx, s.Clients.ELB)
+		return run(func(ctx context.Context) (discoveryResult, error) {
+			return listing(awsx.TargetGroups(ctx, s.Clients.ELB))
 		})
 	case "loadbalancers":
-		return awsx.Cached(ctx, s.Cache, key, func(ctx context.Context) ([]awsx.Resource, error) {
-			return awsx.LoadBalancers(ctx, s.Clients.ELB)
+		return run(func(ctx context.Context) (discoveryResult, error) {
+			return listing(awsx.LoadBalancers(ctx, s.Clients.ELB))
 		})
 	case "loggroups":
-		return awsx.Cached(ctx, s.Cache, key, func(ctx context.Context) ([]awsx.Resource, error) {
-			return awsx.LogGroups(ctx, s.Clients.Logs, prefix)
+		return run(func(ctx context.Context) (discoveryResult, error) {
+			return listing(awsx.LogGroups(ctx, s.Clients.Logs, prefix))
 		})
 	case "waf-loggroups":
 		// WAF log groups are listed from the WAF region. A CLOUDFRONT-scoped
 		// web ACL writes only into us-east-1, so listing the working region
 		// returns nothing and reads as "this account has no WAF logging".
-		return awsx.Cached(ctx, s.Cache, key, func(ctx context.Context) ([]awsx.Resource, error) {
-			return awsx.LogGroups(ctx, s.Clients.LogsGlobal, prefix)
+		return run(func(ctx context.Context) (discoveryResult, error) {
+			return listing(awsx.LogGroups(ctx, s.Clients.LogsGlobal, prefix))
 		})
 	case "rdsproxies":
-		return awsx.Cached(ctx, s.Cache, key, func(ctx context.Context) ([]awsx.Resource, error) {
-			return awsx.RDSProxies(ctx, s.Clients.RDS)
+		return run(func(ctx context.Context) (discoveryResult, error) {
+			return listing(awsx.RDSProxies(ctx, s.Clients.RDS))
 		})
 	case "clusters":
-		return awsx.Cached(ctx, s.Cache, key, func(ctx context.Context) ([]awsx.Resource, error) {
-			return awsx.Clusters(ctx, s.Clients.EKS)
+		return run(func(ctx context.Context) (discoveryResult, error) {
+			return listing(awsx.Clusters(ctx, s.Clients.EKS))
 		})
 	case "webacls":
 		// Both scopes are listed: a regional ACL fronting an ALB and a
 		// CLOUDFRONT one are equally likely, and the CLOUDFRONT list only
 		// exists in us-east-1.
-		return awsx.Cached(ctx, s.Cache, key, func(ctx context.Context) ([]awsx.Resource, error) {
+		return run(func(ctx context.Context) (discoveryResult, error) {
 			regional, err := awsx.WebACLs(ctx, s.Clients.WAF, waftypes.ScopeRegional)
 			if err != nil {
-				return nil, err
+				return discoveryResult{}, err
 			}
+			out := discoveryResult{Resources: regional.Resources, Truncated: regional.Truncated}
+
 			global, err := awsx.WebACLs(ctx, s.Clients.WAFGlobal, waftypes.ScopeCloudfront)
 			if err != nil {
-				// A missing CLOUDFRONT permission should not hide the
-				// regional ACLs the operator can actually use.
-				return regional, nil
+				// A missing CLOUDFRONT permission must not hide the regional
+				// ACLs the operator can actually use — but it is reported
+				// rather than swallowed, because this branch also fires when
+				// wafRegion equals the working region (awsx.New aliases the
+				// global client to the regional one, and a CLOUDFRONT-scoped
+				// call outside us-east-1 fails), which would otherwise make a
+				// misconfigured wafRegion completely invisible.
+				out.Partial = append(out.Partial, fmt.Sprintf("CLOUDFRONT 스코프 조회 실패: %v", err))
+				return out, nil
 			}
-			return append(regional, global...), nil
+			out.Resources = append(out.Resources, global.Resources...)
+			out.Truncated = out.Truncated || global.Truncated
+			return out, nil
 		})
 	default:
-		return nil, errUnknownKind
+		return discoveryResult{}, errUnknownKind
 	}
 }

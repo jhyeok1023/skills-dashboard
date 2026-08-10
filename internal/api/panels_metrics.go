@@ -185,11 +185,22 @@ func (s *Service) buildTargetGroupPanel(rc requestCtx) (*domain.Panel, error) {
 		for _, fs := range sets {
 			list := results[spec.Key+"|"+fs.id]
 			awsx.SortSeries(list)
+			// One target group normally yields one series. It yields more when
+			// the group is registered with several load balancers, and then the
+			// app name alone names both of them identically — so CloudWatch's
+			// own label, which carries the dimensions it matched, is appended to
+			// tell them apart. Doing it only when there is something to
+			// disambiguate keeps the common legend short.
+			ambiguous := len(list) > 1
 			series := toSeries(rc.w, list, spec, func(m awsx.MetricSeries) string {
-				if len(sets) == 1 {
-					return spec.Label
+				label := spec.Label
+				if len(sets) > 1 {
+					label = fs.label + " · " + spec.Label
 				}
-				return fs.label + " · " + spec.Label
+				if ambiguous && m.Label != "" {
+					label += " (" + m.Label + ")"
+				}
+				return label
 			})
 			panel.Series = append(panel.Series, series...)
 			byKey[spec.Key] = append(byKey[spec.Key], series...)
@@ -224,14 +235,25 @@ func (s *Service) buildTargetGroupPanel(rc requestCtx) (*domain.Panel, error) {
 	return panel, nil
 }
 
+// targetGroupFilterSets builds one filter set per selected target group.
+//
+// The LoadBalancer dimension is deliberately not pinned to cfg.LoadBalancer
+// here. The SEARCH schema already carries it — {AWS/ApplicationELB,
+// LoadBalancer,TargetGroup} — and that is what restricts the match to
+// per-target metrics rather than the ALB's own; the value term would only
+// narrow it further. A target group dimension is globally unique, so narrowing
+// buys nothing, and it costs something real: with one target group per app
+// spread across more than one ALB, every group not on cfg.LoadBalancer matched
+// no metric at all and plotted as a flat empty series, which reads as "this app
+// had no traffic".
 func targetGroupFilterSets(cfg config.Config) []filterSet {
 	var out []filterSet
 	for _, tg := range cfg.TargetGroups {
-		filters := map[string]string{"TargetGroup": tg}
-		if cfg.LoadBalancer != "" {
-			filters["LoadBalancer"] = cfg.LoadBalancer
-		}
-		out = append(out, filterSet{id: tg, label: domain.FriendlyTargetGroupName(lastSegmentName(tg)), filters: filters})
+		out = append(out, filterSet{
+			id:      tg,
+			label:   domain.FriendlyTargetGroupName(lastSegmentName(tg)),
+			filters: map[string]string{"TargetGroup": tg},
+		})
 	}
 	if len(out) == 0 && cfg.LoadBalancer != "" {
 		out = append(out, filterSet{

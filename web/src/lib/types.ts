@@ -167,6 +167,12 @@ export interface Resource {
 export interface DiscoveryResponse {
 	kind: string;
 	resources: Resource[];
+	/** The page cap stopped the walk, so the list may be missing entries. */
+	truncated?: boolean;
+	/** How long the listing took. Absent when the server's cache answered. */
+	elapsedMs?: number;
+	/** Scopes that failed without failing the whole call, in words. */
+	partial?: string[];
 }
 
 export interface LogLine {

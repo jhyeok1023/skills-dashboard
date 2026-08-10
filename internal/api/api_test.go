@@ -21,6 +21,10 @@ import (
 	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
 	elbtypes "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
+	"github.com/aws/aws-sdk-go-v2/service/rds"
+	rdstypes "github.com/aws/aws-sdk-go-v2/service/rds/types"
+	"github.com/aws/aws-sdk-go-v2/service/wafv2"
+	waftypes "github.com/aws/aws-sdk-go-v2/service/wafv2/types"
 
 	"github.com/jhyeok1023/skills-dashboard/internal/awsx"
 	"github.com/jhyeok1023/skills-dashboard/internal/config"
@@ -34,11 +38,24 @@ var testNow = time.Date(2026, 8, 10, 10, 3, 47, 0, time.UTC)
 type stubMetrics struct {
 	mu    sync.Mutex
 	calls int
+	// exprs keeps every SEARCH that was issued, so a test can assert on the
+	// dimensions a panel actually asked CloudWatch to filter by.
+	exprs []string
+}
+
+// expressions returns the SEARCH strings seen so far.
+func (s *stubMetrics) expressions() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.exprs...)
 }
 
 func (s *stubMetrics) GetMetricData(_ context.Context, in *cloudwatch.GetMetricDataInput, _ ...func(*cloudwatch.Options)) (*cloudwatch.GetMetricDataOutput, error) {
 	s.mu.Lock()
 	s.calls++
+	for _, q := range in.MetricDataQueries {
+		s.exprs = append(s.exprs, aws.ToString(q.Expression))
+	}
 	s.mu.Unlock()
 
 	start := aws.ToTime(in.StartTime)
@@ -272,6 +289,48 @@ func (stubELB) DescribeTargetGroups(context.Context, *elasticloadbalancingv2.Des
 	return &elasticloadbalancingv2.DescribeTargetGroupsOutput{}, nil
 }
 
+// stubRDS and stubWAF answer the two discoveries that had no test service to
+// run against at all: Clients.RDS, Clients.WAF and Clients.WAFGlobal were left
+// nil, so calling either endpoint here reached a method on a nil interface,
+// panicked, and was flattened into a 500 by recoverPanics. Both are exactly the
+// endpoints an operator reported as returning nothing.
+type stubRDS struct {
+	err error
+}
+
+func (s stubRDS) DescribeDBProxies(context.Context, *rds.DescribeDBProxiesInput, ...func(*rds.Options)) (*rds.DescribeDBProxiesOutput, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &rds.DescribeDBProxiesOutput{DBProxies: []rdstypes.DBProxy{{
+		DBProxyName:  aws.String("app-proxy"),
+		DBProxyArn:   aws.String("arn:aws:rds:ap-northeast-2:123456789012:db-proxy/app-proxy"),
+		EngineFamily: aws.String("POSTGRESQL"),
+		Status:       rdstypes.DBProxyStatusAvailable,
+	}}}, nil
+}
+
+// stubWAF answers per scope, so a test can deny one scope and keep the other.
+type stubWAF struct {
+	scope waftypes.Scope
+	name  string
+	err   error
+}
+
+func (s stubWAF) ListWebACLs(_ context.Context, in *wafv2.ListWebACLsInput, _ ...func(*wafv2.Options)) (*wafv2.ListWebACLsOutput, error) {
+	if in.Scope != s.scope {
+		return nil, fmt.Errorf("AccessDeniedException: not permitted for scope %s", in.Scope)
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &wafv2.ListWebACLsOutput{WebACLs: []waftypes.WebACLSummary{{
+		Name: aws.String(s.name),
+		Id:   aws.String("acl-" + s.name),
+		ARN:  aws.String("arn:aws:wafv2:ap-northeast-2:123456789012:regional/webacl/" + s.name + "/1"),
+	}}}, nil
+}
+
 // stubEKS supplies the node group scaling limits, the only source for the
 // minimum and maximum node counts.
 type stubEKS struct{}
@@ -324,7 +383,9 @@ func newTestService(t *testing.T) (*Service, http.Handler) {
 		Clients: &awsx.Clients{
 			Region: "ap-northeast-2", WAFRegion: "us-east-1",
 			CW: metrics, CWGlobal: metrics, Logs: logs, LogsGlobal: logsGlobal,
-			EKS: stubEKS{}, ELB: stubELB{},
+			EKS: stubEKS{}, ELB: stubELB{}, RDS: stubRDS{},
+			WAF:       stubWAF{scope: waftypes.ScopeRegional, name: "skills-waf"},
+			WAFGlobal: stubWAF{scope: waftypes.ScopeCloudfront, name: "edge-waf"},
 		},
 		Insights:       &awsx.InsightsRunner{API: logs, Concurrency: 6, PollInterval: time.Millisecond},
 		InsightsGlobal: &awsx.InsightsRunner{API: logsGlobal, Concurrency: 6, PollInterval: time.Millisecond},
@@ -1049,6 +1110,189 @@ func TestLoadBalancerDiscoveryReturnsTheDimensionNotTheARN(t *testing.T) {
 	}
 	if r.ARN != testLBArn {
 		t.Errorf("ARN = %q, want it carried through for reference", r.ARN)
+	}
+}
+
+// A target group's metrics must not be scoped to the one load balancer the
+// config happens to name.
+//
+// With one target group per application, those groups can sit behind more than
+// one ALB. Pinning LoadBalancer to the single configured value made every group
+// on any other ALB match nothing at all, and a SEARCH that matches nothing
+// plots as a flat empty line — which reads as an application with no traffic
+// rather than as a query asking the wrong question. The SEARCH schema already
+// restricts the match to per-target metrics, and a TargetGroup dimension is
+// unique on its own, so the value term was only ever narrowing.
+func TestTargetGroupMetricsAreNotPinnedToOneLoadBalancer(t *testing.T) {
+	svc, h := newTestService(t)
+	cfg := svc.Store.Get()
+	cfg.LoadBalancer = "app/other-alb/50dc6c495c0c9188"
+	cfg.TargetGroups = []string{
+		"targetgroup/k8s-default-checkout-1111111111/aaa",
+		"targetgroup/k8s-default-search-2222222222/bbb",
+	}
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := get(t, h, "/api/panel/targetgroup?range=1h&period=5m"); rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	exprs := svc.Clients.CW.(*stubMetrics).expressions()
+	if len(exprs) == 0 {
+		t.Fatal("the panel issued no queries")
+	}
+	var sawCheckout bool
+	for _, e := range exprs {
+		if strings.Contains(e, "LoadBalancer=") {
+			t.Errorf("a target group query pinned the load balancer: %s", e)
+		}
+		if !strings.Contains(e, "{AWS/ApplicationELB,LoadBalancer,TargetGroup}") {
+			t.Errorf("the schema no longer restricts the match to per-target metrics: %s", e)
+		}
+		if strings.Contains(e, "k8s-default-checkout-1111111111") {
+			sawCheckout = true
+		}
+	}
+	if !sawCheckout {
+		t.Error("no query was issued for the first target group")
+	}
+}
+
+// With no target group chosen the panel falls back to the load balancer's own
+// metrics, and there the dimension really is required.
+func TestTargetGroupPanelStillScopesTheLoadBalancerFallback(t *testing.T) {
+	svc, h := newTestService(t)
+	cfg := svc.Store.Get()
+	cfg.TargetGroups = nil
+	cfg.LoadBalancer = "app/my-alb/50dc6c495c0c9188"
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := get(t, h, "/api/panel/targetgroup?range=1h&period=5m"); rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+
+	for _, e := range svc.Clients.CW.(*stubMetrics).expressions() {
+		if !strings.Contains(e, `LoadBalancer="app/my-alb/50dc6c495c0c9188"`) {
+			t.Errorf("the fallback lost its load balancer scope: %s", e)
+		}
+	}
+}
+
+// RDS Proxy and Web ACL discovery had no test at all, which is how two
+// endpoints an operator depends on came to be shipped untried.
+func TestRDSProxyDiscoveryListsProxies(t *testing.T) {
+	_, h := newTestService(t)
+
+	resp := discover(t, h, "/api/discovery/rdsproxies")
+	if len(resp.Resources) != 1 {
+		t.Fatalf("got %d proxies: %+v", len(resp.Resources), resp.Resources)
+	}
+	r := resp.Resources[0]
+	if r.ID != "app-proxy" {
+		t.Errorf("ID = %q, want the ProxyName dimension", r.ID)
+	}
+	if r.Extra["engine"] != "POSTGRESQL" {
+		t.Errorf("engine = %q", r.Extra["engine"])
+	}
+}
+
+func TestWebACLDiscoveryListsBothScopes(t *testing.T) {
+	_, h := newTestService(t)
+
+	resp := discover(t, h, "/api/discovery/webacls")
+	byName := map[string]string{}
+	for _, r := range resp.Resources {
+		byName[r.Name] = r.Extra["scope"]
+	}
+	if byName["skills-waf"] != string(waftypes.ScopeRegional) {
+		t.Errorf("the regional ACL is missing or misfiled: %+v", resp.Resources)
+	}
+	if byName["edge-waf"] != string(waftypes.ScopeCloudfront) {
+		t.Errorf("the CLOUDFRONT ACL is missing or misfiled: %+v", resp.Resources)
+	}
+	if len(resp.Partial) != 0 {
+		t.Errorf("a listing that worked reported %v as partial", resp.Partial)
+	}
+}
+
+// A denied CLOUDFRONT listing must not hide the regional ACLs — and must not be
+// discarded in silence either. Swallowing it is how "this account has no web
+// ACLs" came to be said on the strength of one refused call.
+func TestWebACLDiscoveryReportsADiscardedScope(t *testing.T) {
+	svc, h := newTestService(t)
+	svc.Clients.WAFGlobal = stubWAF{
+		scope: waftypes.ScopeCloudfront,
+		err:   fmt.Errorf("AccessDeniedException: wafv2:ListWebACLs is not allowed"),
+	}
+
+	resp := discover(t, h, "/api/discovery/webacls")
+	if len(resp.Resources) != 1 || resp.Resources[0].Name != "skills-waf" {
+		t.Fatalf("the usable regional ACL was lost with the denied one: %+v", resp.Resources)
+	}
+	if len(resp.Partial) == 0 {
+		t.Fatal("the denied CLOUDFRONT scope was discarded without saying so")
+	}
+	if !strings.Contains(resp.Partial[0], "CLOUDFRONT") {
+		t.Errorf("partial = %q, want it to name the scope", resp.Partial[0])
+	}
+}
+
+// Every walk is capped. A capped list that does not say so offers a short list
+// with no reason to doubt it, which is indistinguishable from a complete one.
+func TestDiscoveryReportsATruncatedWalk(t *testing.T) {
+	svc, h := newTestService(t)
+	svc.Clients.ELB = endlessELB{}
+
+	resp := discover(t, h, "/api/discovery/targetgroups")
+	if !resp.Truncated {
+		t.Error("the walk hit the page cap without saying so")
+	}
+	if len(resp.Resources) == 0 {
+		t.Error("the capped walk returned nothing at all")
+	}
+}
+
+// endlessELB never stops paginating.
+type endlessELB struct{}
+
+func (endlessELB) DescribeLoadBalancers(context.Context, *elasticloadbalancingv2.DescribeLoadBalancersInput, ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeLoadBalancersOutput, error) {
+	return &elasticloadbalancingv2.DescribeLoadBalancersOutput{}, nil
+}
+
+func (endlessELB) DescribeTargetGroups(context.Context, *elasticloadbalancingv2.DescribeTargetGroupsInput, ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeTargetGroupsOutput, error) {
+	return &elasticloadbalancingv2.DescribeTargetGroupsOutput{
+		TargetGroups: []elbtypes.TargetGroup{{
+			TargetGroupArn:  aws.String("arn:aws:elasticloadbalancing:ap-northeast-2:1:targetgroup/k8s-default-a-1/x"),
+			TargetGroupName: aws.String("k8s-default-a-1"),
+		}},
+		NextMarker: aws.String("more"),
+	}, nil
+}
+
+// Why a lookup failed is the whole reason the settings page has an error line.
+// It has to survive from the AWS call to the browser without being reduced to
+// a bare status code.
+func TestDiscoveryFailureReachesTheBrowser(t *testing.T) {
+	svc, h := newTestService(t)
+	svc.Clients.RDS = stubRDS{err: fmt.Errorf("AccessDeniedException: rds:DescribeDBProxies is not allowed")}
+
+	rec := get(t, h, "/api/discovery/rdsproxies")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status %d, want 502: %s", rec.Code, rec.Body.String())
+	}
+	var body errorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body.Detail, "DescribeDBProxies") {
+		t.Errorf("detail = %q, want the AWS call and its reason", body.Detail)
+	}
+	if body.Hint == "" {
+		t.Error("no hint about what to check")
 	}
 }
 
