@@ -6,6 +6,8 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -52,12 +54,83 @@ func (c Credentials) Validate() error {
 	return nil
 }
 
-// DefaultEnvFile is the file consulted when none is named on the command line.
+// DefaultEnvFile is the name of the file credentials are read from.
 const DefaultEnvFile = ".env"
+
+// envFileCandidates lists where a .env is looked for, in order. It is given the
+// directories rather than finding them so the ordering can be tested without a
+// real executable and a real home.
+//
+// The working directory is deliberately absent. A shipped binary is started by
+// double-clicking it, or from whatever shell happened to be open, so cwd says
+// nothing about where the operator put their key — a .env sitting next to the
+// binary was invisible from one directory up, which is what "the dashboard
+// cannot read .env" turned out to mean. Where the file lives is a property of
+// the install, not of how the process was launched.
+//
+// In development the credentials arrive through the process environment
+// instead: mise exports the repo's own .env (mise.toml, [env] _.file) and
+// LoadCredentials falls back to it.
+func envFileCandidates(exeDir, homeDir string) []string {
+	var out []string
+	for _, dir := range []string{exeDir, homeDir} {
+		if dir == "" {
+			continue
+		}
+		p := filepath.Join(dir, DefaultEnvFile)
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		if !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// ResolveEnvFile picks the .env to read.
+//
+// A path named on the command line is used as given and must exist: a typo
+// there should say so rather than fall through to an empty environment, which
+// is how the old silent-miss behaviour looked from the outside. Otherwise the
+// first existing candidate wins; when none exists the caller gets the list back,
+// because "no credentials" is only actionable together with the places checked.
+//
+// A missing file is not an error in the unnamed case — the process environment
+// may already carry the values.
+func ResolveEnvFile(named string) (path string, tried []string, err error) {
+	if named != "" {
+		if _, err := os.Stat(named); err != nil {
+			return "", nil, err
+		}
+		return named, []string{named}, nil
+	}
+
+	var exeDir, homeDir string
+	if exe, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(exe)
+	}
+	if dir, err := Dir(); err == nil {
+		homeDir = dir
+	}
+
+	tried = envFileCandidates(exeDir, homeDir)
+	for _, p := range tried {
+		if _, err := os.Stat(p); err == nil {
+			return p, tried, nil
+		}
+	}
+	return "", tried, nil
+}
 
 // LoadEnvFile parses a .env file into a map. A missing file is not an error:
 // the process environment may already carry the values.
 func LoadEnvFile(path string) (map[string]string, error) {
+	// An empty path is what ResolveEnvFile reports when no candidate existed.
+	// It means "there is no file", same as a missing one.
+	if path == "" {
+		return map[string]string{}, nil
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -1,4 +1,5 @@
 import type {
+	CheckResult,
 	Config,
 	DiscoveryResponse,
 	Identity,
@@ -110,6 +111,17 @@ export const api = {
 		request<Payload>(`/api/panel/${id}${windowQuery(range, period)}`, { signal }),
 
 	config: () => request<Config>('/api/config'),
+
+	/**
+	 * POST, though it reads: every call sends a real request to a real service.
+	 * Its own timeout is longer than the server's 10s probe budget, so the
+	 * server's answer — which knows *what* failed — wins the race.
+	 */
+	check: () =>
+		request<CheckResult>('/api/check', {
+			method: 'POST',
+			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+		}),
 
 	saveConfig: (cfg: Config) =>
 		request<Config>('/api/config', { method: 'PUT', body: JSON.stringify(cfg) }),

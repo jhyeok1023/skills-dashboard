@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,10 +41,18 @@ type Service struct {
 	// instead of failing opaquely, so the settings page can explain what to fix.
 	CredentialError error
 
+	// EnvFile is the .env the credentials were read from, empty when none was
+	// found. It rides into the hint so "fix your .env" names an actual path
+	// rather than leaving the operator to guess which of two locations was used.
+	EnvFile string
+
 	// ConfigNotices is what loading the stored config had to change. A value
 	// the loader discarded leaves a panel empty, and an empty panel with no
 	// explanation is indistinguishable from a resource with no traffic.
 	ConfigNotices []string
+
+	// The traffic check's outbound client. See check.go.
+	checkState
 }
 
 func (s *Service) now() time.Time {
@@ -72,6 +81,11 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /api/config", s.handleGetConfig)
 	mux.HandleFunc("PUT /api/config", s.handlePutConfig)
 	mux.HandleFunc("POST /api/logfmt/preview", s.handleLogFormatPreview)
+
+	// POST, though it reads rather than writes: every call sends a real request
+	// to a real service, so it must not be something a browser, a proxy or a
+	// prefetch can decide to repeat on its own.
+	mux.HandleFunc("POST /api/check", s.handleCheck)
 
 	mux.HandleFunc("GET /api/discovery/{kind}", s.handleDiscovery)
 
@@ -140,16 +154,26 @@ func upstream(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusBadGateway, err, "AWS 호출이 실패했습니다. 자격증명과 권한을 확인하세요.")
 }
 
+// credentialHint says what to edit and where. The settings page shows the hint
+// in preference to the detail, so the path has to travel in the hint or it is
+// never seen.
+func (s *Service) credentialHint() string {
+	if s.EnvFile == "" {
+		return "AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION 을 담은 .env 를 " +
+			"실행 파일과 같은 폴더나 ~/.skills-dashboard 에 두고 다시 실행하세요."
+	}
+	return s.EnvFile + " 에 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION 을 설정한 뒤 다시 실행하세요."
+}
+
 // requireAWS reports whether the service has usable credentials.
 func (s *Service) requireAWS(w http.ResponseWriter) bool {
 	if s.CredentialError != nil {
-		writeError(w, http.StatusServiceUnavailable, s.CredentialError,
-			".env 파일에 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION을 설정한 뒤 다시 실행하세요.")
+		writeError(w, http.StatusServiceUnavailable, s.CredentialError, s.credentialHint())
 		return false
 	}
 	if s.Clients == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("AWS clients are not configured"),
-			".env 파일을 확인하세요.")
+			s.credentialHint())
 		return false
 	}
 	return true
@@ -250,8 +274,11 @@ func (s *Service) handleIdentity(w http.ResponseWriter, _ *http.Request) {
 func (s *Service) panelBuilders() map[string]panelBuilder {
 	return map[string]panelBuilder{
 		"targetgroup":      s.buildTargetGroupPanel,
-		"pod-resource":     s.buildPodResourcePanel,
-		"node-resource":    s.buildNodeResourcePanel,
+		"pod-cpu":          s.podResourcePanel("pod-cpu", "팟 CPU 사용률", "pod.cpu"),
+		"pod-mem":          s.podResourcePanel("pod-mem", "팟 메모리 사용률", "pod.mem"),
+		"node-cpu":         s.nodeResourcePanel("node-cpu", "노드 CPU 사용률", "node.cpu"),
+		"node-mem":         s.nodeResourcePanel("node-mem", "노드 메모리 사용률", "node.mem"),
+		"node-disk":        s.nodeResourcePanel("node-disk", "노드 디스크 사용률", "node.fs"),
 		"counts":           s.buildCountsPanel,
 		"pod-status":       s.buildPodStatusPanel,
 		"rds-proxy":        s.buildRDSProxyPanel,
@@ -267,13 +294,19 @@ func (s *Service) panelBuilders() map[string]panelBuilder {
 
 type panelBuilder func(ctx requestCtx) (*domain.Panel, error)
 
+// pageBudget bounds one whole page request. It has to stay under the server's
+// WriteTimeout (cmd/skills-dashboard/main.go) with room for the response to be
+// written, so that a page which runs long degrades into warnings rather than a
+// severed connection.
+const pageBudget = 90 * time.Second
+
 // pages lists which panels each screen shows.
 var pages = map[string][]string{
 	"overview":    {"pod-latency", "pod-status-codes", "targetgroup", "counts", "pod-status", "waf-traffic"},
 	"pod-logs":    {"pod-latency", "pod-status-codes", "pod-errors"},
 	"waf":         {"waf-traffic", "waf-blocked", "waf-breakdown", "waf-metrics"},
 	"targetgroup": {"targetgroup"},
-	"kubernetes":  {"pod-resource", "node-resource", "counts", "pod-status"},
+	"kubernetes":  {"pod-cpu", "pod-mem", "node-cpu", "node-mem", "node-disk", "counts", "pod-status"},
 	"database":    {"rds-proxy"},
 }
 
@@ -320,7 +353,18 @@ func (s *Service) handlePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rc := requestCtx{ctx: r.Context(), w: win, cfg: s.Store.Get()}
+	// Panels are built one after another and each one may sit on a full wave of
+	// Logs Insights queries, so a slow page can outlast the server's own
+	// WriteTimeout — at which point Go closes the connection mid-response and
+	// the browser reports a transport failure, blanking the whole page. This
+	// deadline lands first, and lands *inside* a handler: the queries still
+	// running are cancelled, noteQueryErrors turns them into per-panel
+	// warnings, and the panels that did finish are still rendered. A page that
+	// names its slow query beats a page that says nothing at all.
+	ctx, cancel := context.WithTimeout(r.Context(), pageBudget)
+	defer cancel()
+
+	rc := requestCtx{ctx: ctx, w: win, cfg: s.Store.Get()}
 	builders := s.panelBuilders()
 	payload := domain.NewPayload(win)
 

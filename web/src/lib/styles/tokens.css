@@ -50,6 +50,32 @@
 	--intent-bad: var(--system-red);
 	--intent-neutral: var(--label-secondary);
 
+	/* WAF actions. Fixed per action and named here so a block is the same
+	   colour in a line, a swatch, a tooltip row and a badge. These alias the
+	   system colours rather than restating them, so they follow the theme
+	   without being spelled out in each appearance below.
+
+	   They must agree with wafActionColor() in internal/api/panels_logs.go,
+	   which tags each series with the same system colour name. */
+	--waf-allow: var(--system-green);
+	--waf-block: var(--system-pink);
+	--waf-count: var(--system-gray);
+	--waf-challenge: var(--system-orange);
+	--waf-captcha: var(--system-purple);
+
+	/* One ordering for everything that overlaps, so a panel lifted for an
+	   alarm cannot end up on top of the header that scrolls over it. */
+	--z-panel: 0;
+	--z-panel-alarm: 2;
+	--z-sticky-head: 9;
+	--z-topbar: 10;
+	--z-tooltip: 50;
+	/* Above the tooltip, so an expanded chart's own readout is not overlapped
+	   by a readout belonging to the page underneath. A native <dialog> in its
+	   top layer is above all of this anyway; the token keeps the ordering
+	   written down in one place rather than implied by the element. */
+	--z-modal: 100;
+
 	--radius-card: 12px;
 	--radius-control: 8px;
 

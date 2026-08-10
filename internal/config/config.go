@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -39,6 +40,31 @@ type Config struct {
 
 	LogFormat domain.LogFormat `json:"logFormat"`
 	Limits    Limits           `json:"limits"`
+
+	// Check is the endpoint the 트래픽 점검 screen requests. Empty leaves that
+	// screen with nothing to do but say so.
+	Check HealthCheck `json:"check"`
+}
+
+// HealthCheck is the one place the dashboard reaches something other than AWS.
+//
+// Everything else here reads CloudWatch, which lags by minutes and cannot tell
+// "no metrics were published" apart from "the service is down". A request the
+// operator asks for, to an address they typed, answers that directly.
+type HealthCheck struct {
+	// URL is the address to request. http and https only.
+	URL string `json:"url"`
+	// ExpectStatus is the status code that counts as healthy. Zero means any
+	// 2xx, which is what most people mean by "it works".
+	ExpectStatus int `json:"expectStatus"`
+}
+
+// OK reports whether status is the one this check calls healthy.
+func (h HealthCheck) OK(status int) bool {
+	if h.ExpectStatus > 0 {
+		return status == h.ExpectStatus
+	}
+	return status >= 200 && status < 300
 }
 
 // Limits bound the work a single request may provoke.
@@ -162,6 +188,27 @@ func (c *Config) inspect() []problem {
 			drop:    func(c *Config) { c.LoadBalancer = "" },
 		})
 	}
+	// The one address in this file that the dashboard itself will request, so
+	// it is the one that has to be checked as an address and not just as text.
+	// A scheme other than http/https would let a stored config point the
+	// process at file:// or a custom handler; refusing at the boundary is
+	// cheaper than reasoning about what each scheme would do.
+	if c.Check.URL != "" {
+		if reason := checkURLProblem(c.Check.URL); reason != "" {
+			out = append(out, problem{
+				msg:     fmt.Sprintf("check.url %q는 사용할 수 없습니다: %s", c.Check.URL, reason),
+				dropped: "이 값을 비웠습니다. 설정에서 다시 입력하세요.",
+				drop:    func(c *Config) { c.Check = HealthCheck{} },
+			})
+		}
+	}
+	if c.Check.ExpectStatus != 0 && (c.Check.ExpectStatus < 100 || c.Check.ExpectStatus > 599) {
+		out = append(out, problem{
+			msg:     fmt.Sprintf("check.expectStatus %d는 HTTP 상태 코드가 아닙니다", c.Check.ExpectStatus),
+			dropped: "2xx 를 정상으로 보도록 되돌렸습니다.",
+			drop:    func(c *Config) { c.Check.ExpectStatus = 0 },
+		})
+	}
 	if err := c.LogFormat.Validate(); err != nil {
 		out = append(out, problem{
 			msg:     fmt.Sprintf("logFormat: %v", err),
@@ -233,6 +280,23 @@ func (c *Config) fillDefaults() {
 // app/<name>/<id>. The dashboard reads only AWS/ApplicationELB, so an NLB or
 // gateway dimension would be as useless here as a name or an ARN.
 var albDimensionRe = regexp.MustCompile(`^app/[^/]+/[0-9a-fA-F]+$`)
+
+// checkURLProblem says why a health-check URL cannot be requested, or "" when
+// it can. Both the save path and the load path go through it, so the settings
+// screen refuses exactly what the loader would have discarded.
+func checkURLProblem(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "주소를 해석할 수 없습니다"
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "http 또는 https 로 시작해야 합니다"
+	}
+	if u.Host == "" {
+		return "호스트가 없습니다"
+	}
+	return ""
+}
 
 // normaliseDimensions converts the load balancer and target group entries into
 // the form CloudWatch expects.
@@ -372,13 +436,25 @@ func save(path string, cfg Config) error {
 	return os.Rename(tmp, path)
 }
 
+// clone copies a config, and every list in it comes out empty rather than nil.
+//
+// The empty start is what keeps `null` off the wire. A nil slice marshals to
+// `null`, the browser's Config declares these as `string[]`, and the settings
+// page's first `.filter` on one of them throws — which takes the whole
+// monitoring-targets section down with it and leaves a page that looks like it
+// has no resource fields at all. Nothing selected yet is the state a fresh
+// install is in, so that was every first run.
+//
+// This is the one seam every stored config crosses on its way out: Get feeds
+// /api/config, and Set feeds both the in-memory copy and the file, so a
+// hand-edited `"targetGroups": null` is normalised on the next save too.
 func (c Config) clone() Config {
 	out := c
-	out.TargetGroups = append([]string(nil), c.TargetGroups...)
-	out.RDSProxies = append([]string(nil), c.RDSProxies...)
-	out.WebACLs = append([]string(nil), c.WebACLs...)
-	out.WAFHeaders = append([]string(nil), c.WAFHeaders...)
-	out.LogFormat.OKStatuses = append([]int(nil), c.LogFormat.OKStatuses...)
-	out.LogFormat.ExcludePaths = append([]string(nil), c.LogFormat.ExcludePaths...)
+	out.TargetGroups = append([]string{}, c.TargetGroups...)
+	out.RDSProxies = append([]string{}, c.RDSProxies...)
+	out.WebACLs = append([]string{}, c.WebACLs...)
+	out.WAFHeaders = append([]string{}, c.WAFHeaders...)
+	out.LogFormat.OKStatuses = append([]int{}, c.LogFormat.OKStatuses...)
+	out.LogFormat.ExcludePaths = append([]string{}, c.LogFormat.ExcludePaths...)
 	return out
 }

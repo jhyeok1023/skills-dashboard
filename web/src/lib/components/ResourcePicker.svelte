@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { Resource } from '$lib/types';
-	import { filterGroups, groupByLoadBalancer, matchesQuery } from '$lib/resources';
+	import { emptyFor, filterGroups, groupByLoadBalancer } from '$lib/resources';
 	import CopyValue from './CopyValue.svelte';
 
 	/**
@@ -39,8 +39,8 @@
 		detailOf?: (r: Resource) => string;
 		/** Shown before the button has ever been pressed. */
 		idleHint?: string;
-		/** The noun for "this region has no ___". */
-		noun: string;
+		/** The noun for "this region has no ___". Defaults to the label. */
+		noun?: string;
 		onDiscover: () => void;
 		onToggle: (r: Resource) => void;
 		onRemove: (id: string) => void;
@@ -58,7 +58,7 @@
 		nameOf = (r: Resource) => r.name,
 		detailOf,
 		idleHint,
-		noun,
+		noun = label,
 		onDiscover,
 		onToggle,
 		onRemove
@@ -66,27 +66,35 @@
 
 	let query = $state('');
 
-	const groups = $derived.by(() => {
-		const list = resources ?? [];
-		if (!list.length) return [];
-		if (!grouped) {
-			return [{ key: '', label: '', items: list.filter((r) => matchesQuery(r, query)) }].filter(
-				(g) => g.items.length > 0
-			);
-		}
-		return filterGroups(groupByLoadBalancer(list), query);
-	});
+	/**
+	 * Sets, not the arrays themselves. One target group per application puts
+	 * hundreds of rows on screen with most of them ticked, and every checkbox,
+	 * every heading count and the orphan list all ask "is this id selected?" on
+	 * every keystroke and every toggle.
+	 */
+	const selectedIds = $derived(new Set(selected));
+	const offeredIds = $derived(new Set((resources ?? []).map((r) => r.id)));
+
+	// Grouping does not depend on the query, so it is not redone on every
+	// keystroke: only the filter below reruns while the operator types.
+	const allGroups = $derived(
+		grouped
+			? groupByLoadBalancer(resources ?? [])
+			: [{ key: '', label: '', items: resources ?? [] }]
+	);
+	const groups = $derived(filterGroups(allGroups, query));
+
+	/** How many of each heading's rows are ticked, counted once per render. */
+	const chosenByKey = $derived(
+		new Map(groups.map((g) => [g.key, g.items.filter((r) => selectedIds.has(r.id)).length]))
+	);
 
 	/** Selected ids the last lookup did not offer, so they can still be removed. */
-	const orphans = $derived(selected.filter((id) => !(resources ?? []).some((r) => r.id === id)));
+	const orphans = $derived(selected.filter((id) => !offeredIds.has(id)));
 
 	const filteredAway = $derived(
 		(resources?.length ?? 0) - groups.reduce((n, g) => n + g.items.length, 0)
 	);
-
-	function chosen(items: Resource[]): number {
-		return items.filter((r) => selected.includes(r.id)).length;
-	}
 
 	/**
 	 * Selects or clears one heading's rows.
@@ -96,9 +104,9 @@
 	 * watching two hundred target groups they never saw.
 	 */
 	function toggleGroup(items: Resource[]) {
-		const all = chosen(items) === items.length;
+		const all = items.every((r) => selectedIds.has(r.id));
 		for (const r of items) {
-			if (selected.includes(r.id) === all) onToggle(r);
+			if (selectedIds.has(r.id) === all) onToggle(r);
 		}
 	}
 </script>
@@ -134,9 +142,7 @@
 		</p>
 	{:else if resources.length === 0}
 		<!-- The state that used to render as nothing at all. -->
-		<p class="tiny muted" data-value>
-			조회했지만 이 리전에 {noun}이(가) 없습니다. 리전과 IAM 권한을 확인하세요.
-		</p>
+		<p class="tiny muted" data-value>{emptyFor(noun)}</p>
 	{:else}
 		{#if resources.length > 8}
 			<input
@@ -156,19 +162,15 @@
 					{#if grouped}
 						<div class="row group-head">
 							<span class="group-name" data-value>{group.label}</span>
-							<span class="tiny muted">{chosen(group.items)} / {group.items.length}</span>
+							<span class="tiny muted">{chosenByKey.get(group.key)} / {group.items.length}</span>
 							<button type="button" class="control tiny" onclick={() => toggleGroup(group.items)}>
-								{chosen(group.items) === group.items.length ? '전체 해제' : '전체 선택'}
+								{chosenByKey.get(group.key) === group.items.length ? '전체 해제' : '전체 선택'}
 							</button>
 						</div>
 					{/if}
 					{#each group.items as r (r.id)}
 						<label class="check">
-							<input
-								type="checkbox"
-								checked={selected.includes(r.id)}
-								onchange={() => onToggle(r)}
-							/>
+							<input type="checkbox" checked={selectedIds.has(r.id)} onchange={() => onToggle(r)} />
 							<span data-value>{nameOf(r)}</span>
 							{#if detailOf}
 								<span class="tiny muted mono" data-value>{detailOf(r)}</span>

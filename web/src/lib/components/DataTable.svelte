@@ -1,6 +1,8 @@
 <script lang="ts">
-	import type { Table } from '$lib/types';
+	import { untrack } from 'svelte';
+	import type { Row, Table } from '$lib/types';
 	import { formatLogTimestamp, formatNumber, formatValue } from '$lib/format';
+	import { wafAction } from '$lib/wafAction';
 	import CopyValue from './CopyValue.svelte';
 
 	/**
@@ -23,13 +25,18 @@
 		caption?: string;
 		/** Rows rendered before a "show the rest" control appears. */
 		initialRows?: number;
+		/** Rows added per press of that control. */
+		step?: number;
 	}
 
-	let { table, caption, initialRows = 8 }: Props = $props();
+	let { table, caption, initialRows = 8, step = 50 }: Props = $props();
 
-	let expanded = $state(false);
-	const visible = $derived(expanded ? table.rows : table.rows.slice(0, initialRows));
-	const remaining = $derived(table.rows.length - visible.length);
+	// The initial value on purpose: `shown` is the operator's position in the
+	// list from here on, and a refresh must not collapse a list they expanded.
+	let shown = $state(untrack(() => initialRows));
+	let query = $state('');
+	let sortKey = $state<string | null>(null);
+	let sortDir = $state<'asc' | 'desc'>('desc');
 
 	function cell(value: unknown, key: string, unit?: string): string {
 		if (value === null || value === undefined || value === '') return '—';
@@ -44,6 +51,100 @@
 			return formatNumber(asNumber);
 		}
 		return String(value);
+	}
+
+	interface Prepared {
+		raw: Row;
+		display: Record<string, string>;
+		/**
+		 * The WAF action a cell holds, for the cells that hold one.
+		 *
+		 * Nothing marks these columns on the wire. The value identifies itself —
+		 * `wafAction` returns null for anything that is not an action — so a
+		 * latency or a pod name is never decorated with a glyph that would mean
+		 * nothing there, and a new action column needs no backend flag.
+		 */
+		actions: Record<string, ReturnType<typeof wafAction>>;
+		/** Everything on the row, lowercased, for the filter to scan once. */
+		search: string;
+	}
+
+	/**
+	 * Formats every fetched row once per payload, not once per render.
+	 *
+	 * Formatting is not free — each cell runs a regex and, for timestamps, an
+	 * Intl formatter, and a full log table is 300 rows across eight columns.
+	 * Doing it in the markup meant sorting, filtering or pressing "더 보기"
+	 * re-formatted all 2,400 cells to change which slice was on screen. This
+	 * depends on `table` alone, so those operations re-slice already-formatted
+	 * strings and nothing is recomputed.
+	 */
+	const prepared = $derived.by<Prepared[]>(() => {
+		const cols = table.columns;
+		return table.rows.map((raw) => {
+			const display: Record<string, string> = {};
+			const actions: Prepared['actions'] = {};
+			let search = '';
+			for (const col of cols) {
+				let text = cell(raw[col.key], col.key, col.unit);
+				const action = col.numeric || col.unit ? null : wafAction(String(raw[col.key] ?? ''));
+				if (action) {
+					actions[col.key] = action;
+					// The filter has to match both what is shown and what was
+					// recorded: an operator types 차단 as readily as BLOCK.
+					search += action.key.toLowerCase() + ' ';
+					text = action.label;
+				}
+				display[col.key] = text;
+				search += text.toLowerCase() + ' ';
+			}
+			return { raw, display, actions, search };
+		});
+	});
+
+	const filtered = $derived.by(() => {
+		const q = query.trim().toLowerCase();
+		if (!q) return prepared;
+		return prepared.filter((r) => r.search.includes(q));
+	});
+
+	const sorted = $derived.by(() => {
+		const key = sortKey;
+		if (!key) return filtered;
+		const col = table.columns.find((c) => c.key === key);
+		const sign = sortDir === 'asc' ? 1 : -1;
+		// Numeric columns sort by the underlying number, never by the rendered
+		// string — "1,284" sorts before "9" as text.
+		const numeric = !!col?.numeric || !!col?.unit;
+		return [...filtered].sort((a, b) => {
+			if (numeric) {
+				const x = Number(a.raw[key] ?? NaN);
+				const y = Number(b.raw[key] ?? NaN);
+				if (!Number.isNaN(x) || !Number.isNaN(y)) {
+					if (Number.isNaN(x)) return 1;
+					if (Number.isNaN(y)) return -1;
+					return (x - y) * sign;
+				}
+			}
+			return a.display[key].localeCompare(b.display[key]) * sign;
+		});
+	});
+
+	const visible = $derived(sorted.slice(0, shown));
+	const remaining = $derived(sorted.length - visible.length);
+
+	function toggleSort(key: string) {
+		if (sortKey === key) {
+			sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+			return;
+		}
+		sortKey = key;
+		sortDir = 'desc';
+	}
+
+	function ariaSort(key: string): 'ascending' | 'descending' | 'none' {
+		if (sortKey !== key) return 'none';
+		return sortDir === 'asc' ? 'ascending' : 'descending';
 	}
 </script>
 
@@ -70,12 +171,34 @@
 	{#if table.rows.length === 0}
 		<p class="muted tiny">이 구간에 해당하는 항목이 없습니다.</p>
 	{:else}
+		{#if table.rows.length > initialRows}
+			<div class="tools row">
+				<input
+					class="control filter"
+					type="search"
+					bind:value={query}
+					placeholder="이 표에서 찾기"
+					aria-label="{caption ?? '표'} 필터"
+				/>
+				{#if query && sorted.length !== prepared.length}
+					<span class="tiny muted">{formatNumber(sorted.length, 0)}건 일치</span>
+				{/if}
+			</div>
+		{/if}
+
 		<div class="table-scroll">
 			<table>
 				<thead>
 					<tr>
 						{#each table.columns as col (col.key)}
-							<th class:numeric={col.numeric} data-value>{col.label}</th>
+							<th class:numeric={col.numeric} aria-sort={ariaSort(col.key)}>
+								<button type="button" class="sort" onclick={() => toggleSort(col.key)}>
+									<span data-value>{col.label}</span>
+									{#if sortKey === col.key}
+										<span class="arrow" aria-hidden="true">{sortDir === 'asc' ? '▲' : '▼'}</span>
+									{/if}
+								</button>
+							</th>
 						{/each}
 					</tr>
 				</thead>
@@ -84,15 +207,22 @@
 						<tr>
 							{#each table.columns as col (col.key)}
 								<td class:numeric={col.numeric} class:mono={col.mono}>
-									{#if col.copyable && row[col.key]}
+									{#if row.actions[col.key]}
+										<!-- Colour never carries the action alone: the glyph beside it
+										     says the same thing in greyscale and to a colourblind eye. -->
+										<span class="action" data-value style:color={row.actions[col.key]?.color}>
+											<span aria-hidden="true">{row.actions[col.key]?.icon}</span>
+											{row.display[col.key]}
+										</span>
+									{:else if col.copyable && row.raw[col.key]}
 										<CopyValue
-											value={cell(row[col.key], col.key, col.unit)}
-											copy={String(row[col.key])}
+											value={row.display[col.key]}
+											copy={String(row.raw[col.key])}
 											mono={col.mono}
 											label={col.label}
 										/>
 									{:else}
-										<span data-value>{cell(row[col.key], col.key, col.unit)}</span>
+										<span data-value>{row.display[col.key]}</span>
 									{/if}
 								</td>
 							{/each}
@@ -103,11 +233,17 @@
 		</div>
 
 		{#if remaining > 0}
-			<button type="button" class="control more" onclick={() => (expanded = true)}>
-				나머지 {formatNumber(remaining, 0)}건 더 보기
+			<!-- Grown a step at a time. Jumping straight to every fetched row
+			     inserted 300 rows of DOM in one frame to reveal the next few. -->
+			<button
+				type="button"
+				class="control more"
+				onclick={() => (shown = Math.min(shown + step, sorted.length))}
+			>
+				{formatNumber(Math.min(step, remaining), 0)}건 더 보기 (남은 {formatNumber(remaining, 0)}건)
 			</button>
-		{:else if expanded && table.rows.length > initialRows}
-			<button type="button" class="control more" onclick={() => (expanded = false)}>접기</button>
+		{:else if shown > initialRows}
+			<button type="button" class="control more" onclick={() => (shown = initialRows)}>접기</button>
 		{/if}
 	{/if}
 </div>
@@ -116,7 +252,7 @@
 	.wrap {
 		display: flex;
 		flex-direction: column;
-		gap: 8px;
+		gap: 6px;
 		min-width: 0;
 	}
 
@@ -132,7 +268,27 @@
 		font-variant-numeric: tabular-nums;
 	}
 
+	.tools {
+		gap: 8px;
+	}
+
+	.filter {
+		flex: 1;
+		min-width: 8rem;
+		max-width: 20rem;
+	}
+
 	.more {
 		align-self: flex-start;
+	}
+
+	/* No `white-space: nowrap`: a value that cannot wrap is a value that gets
+	   clipped in a narrow column, and nothing on this dashboard may be clipped.
+	   The glyph and the label wrap together rather than being cut apart. */
+	.action {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 4px;
+		font-weight: 600;
 	}
 </style>

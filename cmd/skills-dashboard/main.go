@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -55,7 +56,7 @@ func run() error {
 	var (
 		addr    = flag.String("addr", "127.0.0.1", "address to listen on")
 		port    = flag.Int("port", 8080, "port to listen on")
-		envFile = flag.String("env", config.DefaultEnvFile, "path to the .env file holding AWS credentials")
+		envFile = flag.String("env", "", "path to the .env file holding AWS credentials (default: next to the binary, then ~/.skills-dashboard)")
 		open    = flag.Bool("open", true, "open the dashboard in a browser on start")
 		verbose = flag.Bool("verbose", false, "log at debug level")
 	)
@@ -100,13 +101,32 @@ func run() error {
 		Metrics: &awsx.MetricFetcher{},
 	}
 
+	// A path given on the command line has to exist. Anything else is the
+	// operator asking for a file that is not there, and continuing without
+	// credentials would answer that with a message about the wrong subject.
+	envPath, tried, err := config.ResolveEnvFile(*envFile)
+	if err != nil {
+		return fmt.Errorf("read the .env at %s: %w", *envFile, err)
+	}
+	if envPath != "" {
+		logger.Info("reading credentials", "envFile", envPath)
+	} else {
+		logger.Warn("no .env found; falling back to the process environment", "tried", tried)
+	}
+	svc.EnvFile = envPath
+
 	// Credentials are read once at start. A failure is carried rather than
 	// fatal: the UI still comes up and the settings page explains what to fix,
 	// which beats a process that exits before the operator can see why.
-	creds, err := config.LoadCredentials(*envFile)
+	creds, err := config.LoadCredentials(envPath)
 	if err != nil {
 		svc.CredentialError = err
 	} else if err := creds.Validate(); err != nil {
+		// With no file anywhere, the missing keys are only half the story: the
+		// other half is where one was expected to be.
+		if envPath == "" {
+			err = fmt.Errorf("%w (.env 를 다음에서 찾지 못했습니다: %s)", err, strings.Join(tried, ", "))
+		}
 		svc.CredentialError = err
 	} else {
 		clients, err := awsx.New(context.Background(), creds, cfg.WAFRegion)
@@ -158,7 +178,7 @@ func run() error {
 	}
 	if svc.CredentialError != nil {
 		logger.Warn("AWS is unavailable; the UI will explain what to configure",
-			"error", svc.CredentialError, "envFile", *envFile)
+			"error", svc.CredentialError, "envFile", envPath)
 	}
 
 	mux := http.NewServeMux()

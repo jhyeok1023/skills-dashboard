@@ -134,7 +134,7 @@ func classify(q string) string {
 	case strings.Contains(q, "uri as uri, httpRequest.args"):
 		return "wafPath"
 	case strings.Contains(q, "terminatingRuleId as rule") && strings.Contains(q, "sort @timestamp desc"):
-		return "wafBlockedList"
+		return "wafRecentList"
 	case strings.Contains(q, "terminatingRuleId as rule"):
 		return "wafBlocked"
 	case strings.Contains(q, "parse @message"):
@@ -238,29 +238,35 @@ func rowsFor(kind string) [][]logtypes.ResultField {
 			{f("t", bucket(0)), f("action", "BLOCK"), f("n", "100")},
 			{f("t", bucket(2)), f("action", "ALLOW"), f("n", "700")},
 		}
+	// The breakdowns arrive one row per (key, action), which is what the panel
+	// builder folds back together. GET appears twice on purpose: an allowed
+	// majority and a blocked tail is the shape the split exists to reveal.
 	case "wafMethod":
 		return [][]logtypes.ResultField{
-			{f("method", "GET"), f("n", "1500")},
-			{f("method", "POST"), f("n", "200")},
+			{f("method", "GET"), f("action", "ALLOW"), f("n", "1400"), f("lastTs", "2026-08-10 09:40:00.000")},
+			{f("method", "GET"), f("action", "BLOCK"), f("n", "100"), f("lastTs", "2026-08-10 09:41:00.000")},
+			{f("method", "POST"), f("action", "ALLOW"), f("n", "200"), f("lastTs", "2026-08-10 09:20:00.000")},
 		}
 	case "wafPath":
 		return [][]logtypes.ResultField{
-			{f("uri", "/v1/user"), f("args", "email=a@b.c"), f("n", "80")},
-			{f("uri", "/healthcheck"), f("args", ""), f("n", "1200")},
+			{f("uri", "/v1/user"), f("args", "email=a@b.c"), f("action", "ALLOW"), f("n", "60"), f("lastTs", "2026-08-10 09:30:00.000")},
+			{f("uri", "/v1/user"), f("args", "email=a@b.c"), f("action", "COUNT"), f("n", "20"), f("lastTs", "2026-08-10 09:35:00.000")},
+			{f("uri", "/healthcheck"), f("args", ""), f("action", "ALLOW"), f("n", "1200"), f("lastTs", "2026-08-10 09:44:00.000")},
 		}
 	case "wafBlocked":
 		return [][]logtypes.ResultField{
 			{f("rule", "sqli"), f("clientIp", "1.2.3.4"), f("country", "KR"), f("n", "60")},
 			{f("rule", "xss"), f("clientIp", "5.6.7.8"), f("country", "US"), f("n", "40")},
 		}
-	case "wafBlockedList":
+	case "wafRecentList":
 		return [][]logtypes.ResultField{
-			{f("@timestamp", "2026-08-10 09:40:00.000"), f("rule", "sqli"), f("clientIp", "1.2.3.4"), f("country", "KR"), f("method", "GET"), f("uri", "/v1/user"), f("args", "email=a@b.c")},
+			{f("@timestamp", "2026-08-10 09:41:00.000"), f("action", "BLOCK"), f("rule", "sqli"), f("clientIp", "1.2.3.4"), f("country", "KR"), f("method", "GET"), f("uri", "/v1/user"), f("args", "email=a@b.c")},
+			{f("@timestamp", "2026-08-10 09:40:00.000"), f("action", "ALLOW"), f("rule", ""), f("clientIp", "9.9.9.9"), f("country", "JP"), f("method", "GET"), f("uri", "/healthcheck"), f("args", "")},
 		}
 	case "wafHeader":
 		return [][]logtypes.ResultField{
-			{f("value", "Mozilla/5.0"), f("n", "1100")},
-			{f("value", "curl/8"), f("n", "60")},
+			{f("value", "Mozilla/5.0"), f("action", "ALLOW"), f("n", "1100"), f("lastTs", "2026-08-10 09:44:00.000")},
+			{f("value", "curl/8"), f("action", "BLOCK"), f("n", "60"), f("lastTs", "2026-08-10 09:41:00.000")},
 		}
 	default:
 		return nil
@@ -401,6 +407,23 @@ func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
 	return rec
 }
 
+func post(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+	return rec
+}
+
+func decodeJSON(t *testing.T, rec *httptest.ResponseRecorder, into any) {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), into); err != nil {
+		t.Fatalf("decode: %v\n%s", err, rec.Body.String())
+	}
+}
+
 func decodePayload(t *testing.T, rec *httptest.ResponseRecorder) domain.Payload {
 	t.Helper()
 	if rec.Code != http.StatusOK {
@@ -439,6 +462,8 @@ func TestPanelIsIdenticalWhetherFetchedAloneOrInsideAPage(t *testing.T) {
 		{"targetgroup", "overview"},
 		{"counts", "overview"},
 		{"counts", "kubernetes"},
+		{"pod-cpu", "kubernetes"},
+		{"node-cpu", "kubernetes"},
 		{"pod-status", "overview"},
 		{"pod-status", "kubernetes"},
 		{"waf-traffic", "overview"},
@@ -835,6 +860,153 @@ func TestInsightsScanCostIsReported(t *testing.T) {
 	t.Error("no scan-cost stat")
 }
 
+// The WAF traffic panel answers "is traffic arriving, and is it getting
+// through". The list is what makes the second half answerable, and the count
+// beside it has to keep counting past the row cap.
+func TestWAFTrafficListsIndividualRequestsWithTheirAction(t *testing.T) {
+	_, h := newTestService(t)
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/waf-traffic?range=1h&period=5m")), "waf-traffic")
+
+	if panel.Table == nil || len(panel.Table.Rows) == 0 {
+		t.Fatalf("no request list: %+v", panel.Table)
+	}
+	actions := map[string]bool{}
+	for _, r := range panel.Table.Rows {
+		actions[fmt.Sprint(r["action"])] = true
+	}
+	// Filtered to blocks, an empty list cannot tell "nothing was blocked" from
+	// "nothing arrived".
+	if !actions["ALLOW"] || !actions["BLOCK"] {
+		t.Errorf("the list does not cover both outcomes: %v", actions)
+	}
+
+	// The total comes from the action series, counted over the whole window,
+	// not from the length of the capped list beside it. The stub's action
+	// series sums to 1,700 against two listed rows.
+	if panel.Table.Total != 1700 {
+		t.Errorf("table total = %d, want the action series' own sum of 1700", panel.Table.Total)
+	}
+	if !panel.Table.Truncated {
+		t.Error("a list far shorter than its total does not say it was cut")
+	}
+
+	// Bars over individual requests would draw a chart of bars all one high.
+	if panel.Bars != nil {
+		t.Errorf("the request list was turned into a distribution: %+v", panel.Bars)
+	}
+}
+
+// One number counting both the requests that reached the application and the
+// requests the WAF stopped is the thing this breakdown exists to stop being.
+func TestWAFBreakdownSplitsEachKeyByAction(t *testing.T) {
+	_, h := newTestService(t)
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/waf-breakdown?range=1h&period=5m")), "waf-breakdown")
+
+	if panel.Table == nil || len(panel.Table.Rows) == 0 {
+		t.Fatal("no breakdown table")
+	}
+	num := func(r domain.Row, key string) float64 {
+		t.Helper()
+		v, ok := r[key].(float64)
+		if !ok {
+			t.Fatalf("row %v has no numeric %q", r, key)
+		}
+		return v
+	}
+
+	var sawGET bool
+	for _, r := range panel.Table.Rows {
+		// The columns have to add up, or the reader works out the difference
+		// and finds it means nothing.
+		if got, want := num(r, "allow")+num(r, "block")+num(r, "other"), num(r, "count"); got != want {
+			t.Errorf("row %v: allow+block+other = %v, count = %v", r, got, want)
+		}
+		if r["dimension"] != "method" || r["key"] != "GET" {
+			continue
+		}
+		sawGET = true
+		// The stub sends GET twice, allowed 1,400 and blocked 100. Folded into
+		// one row, with the newer of the two timestamps deciding the last
+		// action — which is the block.
+		if num(r, "allow") != 1400 || num(r, "block") != 100 || num(r, "count") != 1500 {
+			t.Errorf("GET row = %v", r)
+		}
+		if r["lastAction"] != "BLOCK" {
+			t.Errorf("GET last action = %v, want the newer of the two rows", r["lastAction"])
+		}
+	}
+	if !sawGET {
+		t.Error("the method breakdown lost its rows in the pivot")
+	}
+}
+
+// The traffic check reaches the service itself, which is the one thing on this
+// dashboard CloudWatch cannot answer: an empty panel does not say whether
+// nothing happened or nothing was published.
+func TestTrafficCheckReportsWhatTheServiceAnswered(t *testing.T) {
+	var got *http.Request
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Clone(context.Background())
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	svc, _ := newTestService(t)
+	cfg := svc.Store.Get()
+	cfg.Check.URL = target.URL + "/healthz"
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+	h := svc.Handler()
+
+	var res checkResult
+	decodeJSON(t, post(t, h, "/api/check"), &res)
+	if !res.OK || res.Status != http.StatusNoContent {
+		t.Errorf("check = %+v, want a healthy 204", res)
+	}
+	if res.Expect != "2xx" {
+		t.Errorf("expect = %q; a red result cannot be read without it", res.Expect)
+	}
+	if got == nil || got.URL.Path != "/healthz" {
+		t.Fatalf("the probe did not reach the target: %v", got)
+	}
+	// Whoever reads the target's access log has to be able to tell this apart
+	// from the real traffic it stands in for.
+	if ua := got.Header.Get("User-Agent"); !strings.Contains(ua, "skills-dashboard") {
+		t.Errorf("User-Agent = %q", ua)
+	}
+
+	// An unexpected status is a completed check with a bad answer, not a
+	// broken endpoint: collapsing the two makes a dashboard bug look like an
+	// outage.
+	cfg.Check.ExpectStatus = http.StatusOK
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+	res = checkResult{}
+	rec := post(t, h, "/api/check")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	decodeJSON(t, rec, &res)
+	if res.OK {
+		t.Errorf("204 counted as healthy against an explicit expectStatus of 200: %+v", res)
+	}
+}
+
+func TestTrafficCheckWithoutATargetSaysSoRatherThanProbing(t *testing.T) {
+	svc, _ := newTestService(t)
+	cfg := svc.Store.Get()
+	cfg.Check = config.HealthCheck{}
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := post(t, svc.Handler(), "/api/check"); rec.Code != http.StatusBadRequest {
+		t.Errorf("status %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // A panel that fails must not blank the ones beside it.
 func TestAFailingPanelDoesNotSinkThePage(t *testing.T) {
 	svc, _ := newTestService(t)
@@ -876,7 +1048,7 @@ func TestUnselectedResourcesProduceAnExplanationNotAnError(t *testing.T) {
 	}
 	h := svc.Handler()
 
-	for _, id := range []string{"targetgroup", "rds-proxy", "waf-metrics", "pod-resource", "counts"} {
+	for _, id := range []string{"targetgroup", "rds-proxy", "waf-metrics", "pod-cpu", "counts"} {
 		p := decodePayload(t, get(t, h, "/api/panel/"+id+"?range=1h&period=5m"))
 		panel := findPanel(t, p, id)
 		if len(panel.Warnings) == 0 {
@@ -1182,6 +1354,42 @@ func TestTargetGroupPanelStillScopesTheLoadBalancerFallback(t *testing.T) {
 	}
 }
 
+// Telling duplicate series apart is not a target-group problem.
+//
+// One filter set yields several series whenever the SEARCH schema leaves a
+// dimension unpinned, and then the set's own name labels every one of them
+// identically — a legend of repeated words over lines that mean different
+// things. The rule lives in setSeriesLabel so every panel plotted from filter
+// sets gets it; this holds the RDS Proxy panel, which used to be one of the
+// copies that did not.
+func TestOneFilterSetWithSeveralSeriesLabelsThemApart(t *testing.T) {
+	svc, h := newTestService(t)
+	cfg := svc.Store.Get()
+	cfg.RDSProxies = []string{"app-proxy"}
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	p := decodePayload(t, get(t, h, "/api/panel/rds-proxy?range=1h&period=5m"))
+	panel := findPanel(t, p, "rds-proxy")
+	if len(panel.Series) < 2 {
+		t.Fatalf("got %d series, want the several one proxy can match", len(panel.Series))
+	}
+
+	seen := map[string]bool{}
+	for _, s := range panel.Series {
+		if seen[s.Label] {
+			t.Errorf("two series share the label %q, so the legend cannot tell them apart", s.Label)
+		}
+		seen[s.Label] = true
+	}
+	// The suffix is CloudWatch's own label, which carries the dimensions it
+	// matched. The stub returns "alpha" and "beta" for every query.
+	if !strings.Contains(panel.Series[0].Label, "(") {
+		t.Errorf("label %q does not carry the dimensions that distinguish it", panel.Series[0].Label)
+	}
+}
+
 // RDS Proxy and Web ACL discovery had no test at all, which is how two
 // endpoints an operator depends on came to be shipped untried.
 func TestRDSProxyDiscoveryListsProxies(t *testing.T) {
@@ -1256,12 +1464,8 @@ func TestDiscoveryReportsATruncatedWalk(t *testing.T) {
 	}
 }
 
-// endlessELB never stops paginating.
-type endlessELB struct{}
-
-func (endlessELB) DescribeLoadBalancers(context.Context, *elasticloadbalancingv2.DescribeLoadBalancersInput, ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeLoadBalancersOutput, error) {
-	return &elasticloadbalancingv2.DescribeLoadBalancersOutput{}, nil
-}
+// endlessELB is stubELB with a target group walk that never stops paginating.
+type endlessELB struct{ stubELB }
 
 func (endlessELB) DescribeTargetGroups(context.Context, *elasticloadbalancingv2.DescribeTargetGroupsInput, ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeTargetGroupsOutput, error) {
 	return &elasticloadbalancingv2.DescribeTargetGroupsOutput{

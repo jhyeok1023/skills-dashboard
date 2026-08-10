@@ -6,6 +6,7 @@
 	import { api, ApiFailure } from '$lib/api';
 	import { timeRange } from '$lib/timerange.svelte';
 	import type { Payload } from '$lib/types';
+	import LoadingSkeleton from './LoadingSkeleton.svelte';
 	import PanelCard from './PanelCard.svelte';
 	import TimeRangePicker from './TimeRangePicker.svelte';
 
@@ -29,6 +30,7 @@
 	let payload = $state<Payload | null>(null);
 	let error = $state<ApiFailure | null>(null);
 	let loading = $state(false);
+	let lastLoadedAt = $state<number | null>(null);
 	let controller: AbortController | null = null;
 
 	async function load() {
@@ -37,7 +39,12 @@
 		loading = true;
 		error = null;
 		try {
+			// `payload` is deliberately not cleared first. A refresh keeps the
+			// numbers that are already on screen and marks the refresh in the
+			// control; blanking the page to a skeleton would hide readable data
+			// to report that newer data is on its way.
 			payload = await api.page(pageId, timeRange.range, timeRange.period, controller.signal);
+			lastLoadedAt = Date.now();
 		} catch (e) {
 			if (e instanceof DOMException && e.name === 'AbortError') return;
 			error = e instanceof ApiFailure ? e : new ApiFailure(0, String(e));
@@ -46,6 +53,13 @@
 			loading = false;
 		}
 	}
+
+	// There is no alarm bar. It listed every stat the backend tagged bad or
+	// warn, and since a blocking WAF is tagged bad by definition, it was
+	// populated on every load — which trained the eye to skip it, taking the
+	// occasional real signal with it. What is worth reading first is now the
+	// ordering of the panels themselves: the rule list arrives sorted by
+	// volume, so the busiest rule is already at the top of it.
 
 	// Restore the selection from the URL once, so a shared or reloaded link
 	// opens the same window it was captured with.
@@ -79,7 +93,13 @@
 			}
 		});
 
-		if (!timeRange.isValid(range, period)) return;
+		// Untracked too, and for the same reason the URL write is: `isValid`
+		// reads `timeRange.ranges`, and `/api/meta` replaces that array once per
+		// session. Read tracked, that one assignment re-ran this effect with an
+		// unchanged range and period — a second, identical request whose first
+		// act is to abort the first one. What this effect is about is the
+		// selection, and the selection is already tracked above.
+		if (!untrack(() => timeRange.isValid(range, period))) return;
 		void load();
 	});
 
@@ -92,12 +112,17 @@
 	});
 </script>
 
-<div class="page stack">
-	<header class="stack head">
-		<h1 data-value>{title}</h1>
-		{#if description}<p class="muted tiny" data-value>{description}</p>{/if}
-		<TimeRangePicker window={payload?.window ?? null} {loading} />
-	</header>
+<div class="page">
+	<!-- Fixed above the data: the time controls stay on screen while the
+	     panels scroll under them. -->
+	<div class="head-sticky">
+		<header class="head-row">
+			<h1 data-value>{title}</h1>
+			<TimeRangePicker window={payload?.window ?? null} {loading} {lastLoadedAt} />
+		</header>
+	</div>
+
+	{#if description}<p class="desc muted tiny" data-value>{description}</p>{/if}
 
 	{#if error}
 		<div class="card error" role="alert">
@@ -120,17 +145,52 @@
 			{/each}
 		</div>
 	{:else}
-		<div class="card"><p class="muted" data-value>조회 중…</p></div>
+		<!-- No payload at all yet. A refresh never reaches here: `load()` leaves
+		     the previous payload in place, so this stands in for an empty
+		     screen and never for a stale one. -->
+		<LoadingSkeleton />
 	{/if}
 </div>
 
 <style>
 	.page {
-		gap: 18px;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		min-width: 0;
 	}
 
-	.head {
+	/* main is the scroll container (see +layout.svelte), so this sticks to the
+	   top of the data area without having to know the topbar's height. */
+	.head-sticky {
+		position: sticky;
+		top: 0;
+		z-index: var(--z-sticky-head);
+		display: flex;
+		flex-direction: column;
 		gap: 6px;
+		padding: 8px 0;
+		background: var(--bg-secondary);
+		border-bottom: 1px solid var(--separator);
+	}
+
+	.head-row {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px 12px;
+		min-width: 0;
+	}
+
+	.head-row h1 {
+		font-size: 17px;
+		margin-right: 4px;
+	}
+
+	/* The description explains the page once; it is not worth the vertical
+	   space in a header that never leaves the screen, so it scrolls away. */
+	.desc {
+		margin-top: 2px;
 	}
 
 	.error h2 {

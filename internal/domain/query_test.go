@@ -388,9 +388,48 @@ func TestWAFQueries(t *testing.T) {
 			t.Errorf("blocked is missing %q:\n%s", want, blocked.Text)
 		}
 	}
-	list := q.BlockedList(100)
+
+	list := q.RecentList(100)
 	if !strings.Contains(list.Text, "sort @timestamp desc") {
-		t.Errorf("blocked list is not newest-first:\n%s", list.Text)
+		t.Errorf("recent list is not newest-first:\n%s", list.Text)
+	}
+	if !strings.Contains(list.Text, "action") {
+		t.Errorf("recent list does not report what the WAF did with each request:\n%s", list.Text)
+	}
+	// Filtered to blocks, an empty list means either "nothing was blocked" or
+	// "nothing arrived", and those are the two answers it exists to separate.
+	if strings.Contains(list.Text, "filter action") {
+		t.Errorf("recent list is filtered to one action:\n%s", list.Text)
+	}
+}
+
+// Without the action in the grouping, one number counted the requests that
+// reached the application and the requests the WAF stopped, together.
+func TestWAFBreakdownsSplitByAction(t *testing.T) {
+	q := WAFQueries{Headers: DefaultWAFHeaders()}
+	header, err := q.ByHeader("User-Agent", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, got := range map[string]Query{
+		"byMethod": q.ByMethod(),
+		"byPath":   q.ByPath(20),
+		"byHeader": header,
+	} {
+		for _, want := range []string{", action", "max(@timestamp) as lastTs", "sort n desc"} {
+			if !strings.Contains(got.Text, want) {
+				t.Errorf("%s is missing %q:\n%s", name, want, got.Text)
+			}
+		}
+	}
+
+	// The header breakdown's stats has to stay piped after its parse/filter.
+	if strings.HasPrefix(header.Text, "|") {
+		t.Errorf("byHeader starts with a pipe:\n%s", header.Text)
+	}
+	if !strings.Contains(header.Text, "| stats count()") {
+		t.Errorf("byHeader's stats is not piped after the parse:\n%s", header.Text)
 	}
 }
 

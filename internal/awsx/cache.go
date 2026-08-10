@@ -100,9 +100,28 @@ func (c *Cache) Do(ctx context.Context, key string, load func(context.Context) (
 		e.val, e.err = load(ctx)
 
 		c.mu.Lock()
-		if e.err != nil {
+		switch {
+		// A failure caused by *this* caller going away is a fact about the
+		// caller, not about the data, so it must not be handed to anyone else.
+		//
+		// This is what made the dashboard fail intermittently. The browser
+		// aborts the in-flight page request whenever the selection changes —
+		// and once per mount, because /api/meta replaces the range table and
+		// re-triggers the load effect. The aborted request is usually the one
+		// holding the key, so its "context canceled" was stored as a cached
+		// failure and served to the request that replaced it. The window is
+		// floored to the period, so with a 1m period the key stays identical
+		// for a full minute and the retry lands on the same poisoned entry.
+		//
+		// The entry is dropped rather than expired: a caller already waiting on
+		// e sees the key no longer maps to it, and loops round to load again.
+		case e.err != nil && ctx.Err() != nil:
+			if c.entries[key] == e {
+				delete(c.entries, key)
+			}
+		case e.err != nil:
 			e.expires = c.now().Add(c.errorTTL())
-		} else {
+		default:
 			e.expires = c.now().Add(c.ttl())
 		}
 		c.mu.Unlock()

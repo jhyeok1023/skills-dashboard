@@ -75,7 +75,6 @@ describe('discover', () => {
 			kind: 'targetgroups',
 			resources: [],
 			truncated: true,
-			elapsedMs: 812,
 			partial: ['CLOUDFRONT 스코프 조회 실패: denied']
 		});
 

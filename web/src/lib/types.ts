@@ -155,6 +155,26 @@ export interface Config {
 	wafHeaders: string[];
 	logFormat: LogFormat;
 	limits: Meta['limits'];
+	check: HealthCheck;
+}
+
+/** The one endpoint the dashboard requests itself. See internal/api/check.go. */
+export interface HealthCheck {
+	url: string;
+	/** 0 means any 2xx counts as healthy. */
+	expectStatus: number;
+}
+
+/** One completed probe. A failed probe is still a completed probe. */
+export interface CheckResult {
+	url: string;
+	ok: boolean;
+	status?: number;
+	elapsedMs: number;
+	at: string;
+	error?: string;
+	/** What the status was compared against, in words. */
+	expect: string;
 }
 
 export interface Resource {
@@ -169,8 +189,6 @@ export interface DiscoveryResponse {
 	resources: Resource[];
 	/** The page cap stopped the walk, so the list may be missing entries. */
 	truncated?: boolean;
-	/** How long the listing took. Absent when the server's cache answered. */
-	elapsedMs?: number;
 	/** Scopes that failed without failing the whole call, in words. */
 	partial?: string[];
 }

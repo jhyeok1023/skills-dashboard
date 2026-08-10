@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"sort"
 	"strings"
 	"testing"
 )
@@ -229,6 +230,53 @@ func TestQueryIDHandlesAwkwardKeys(t *testing.T) {
 	for _, tc := range tests {
 		if got := QueryID(tc.in); got != tc.want {
 			t.Errorf("QueryID(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// A SEARCH schema is matched as a *set* of dimension names. Name a set that
+// Container Insights does not publish and the expression is still valid, still
+// costs a query, and matches nothing — the panel renders an empty chart, which
+// on this dashboard is indistinguishable from a quiet cluster. That is exactly
+// how the node resource and pod status panels shipped blank.
+//
+// The right-hand column is the dimension set this dashboard leans on, copied
+// from the Container Insights metric tables:
+// https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Container-Insights-metrics-EKS.html
+// https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Container-Insights-metrics-enhanced-EKS.html
+func TestContainerInsightsDimensionsArePublishedSets(t *testing.T) {
+	published := map[string]string{
+		"pod_cpu_utilization":                   "ClusterName,Namespace,PodName",
+		"pod_memory_utilization":                "ClusterName,Namespace,PodName",
+		"pod_cpu_utilization_over_pod_limit":    "ClusterName,Namespace,PodName",
+		"pod_memory_utilization_over_pod_limit": "ClusterName,Namespace,PodName",
+		"node_cpu_utilization":                  "ClusterName,InstanceId,NodeName",
+		"node_memory_utilization":               "ClusterName,InstanceId,NodeName",
+		"node_filesystem_utilization":           "ClusterName,InstanceId,NodeName",
+		"service_number_of_running_pods":        "ClusterName,Namespace,Service",
+		"cluster_node_count":                    "ClusterName",
+		"cluster_failed_node_count":             "ClusterName",
+		"pod_status_running":                    "ClusterName,Namespace,PodName",
+		"pod_status_pending":                    "ClusterName,Namespace,PodName",
+		"pod_status_failed":                     "ClusterName,Namespace,PodName",
+		"pod_number_of_container_restarts":      "ClusterName,Namespace,PodName",
+	}
+
+	for _, spec := range AllMetrics() {
+		if spec.Namespace != NSContainer {
+			continue
+		}
+		want, ok := published[spec.MetricName]
+		if !ok {
+			t.Errorf("%s reads %s but this test does not record which dimension sets it is published at; look it up before trusting the panel",
+				spec.Key, spec.MetricName)
+			continue
+		}
+		dims := append([]string(nil), spec.Dimensions...)
+		sort.Strings(dims)
+		if got := strings.Join(dims, ","); got != want {
+			t.Errorf("%s searches {%s} but %s is published at {%s}; the SEARCH matches nothing and the panel renders empty",
+				spec.Key, got, spec.MetricName, want)
 		}
 	}
 }

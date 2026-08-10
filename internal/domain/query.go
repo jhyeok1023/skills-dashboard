@@ -350,22 +350,37 @@ func (q WAFQueries) ActionSeries(w Window) Query {
 	}
 }
 
-// ByMethod counts requests per HTTP method.
+// Every breakdown groups by action as well as by its own key, and carries the
+// newest timestamp in each group.
+//
+// Without the action, "this path was requested 4,000 times" says nothing about
+// whether those requests reached the application — the allowed and the blocked
+// were summed into one number. Grouping is what splits them, and max(@timestamp)
+// per (key, action) is what lets the caller say which action was the most
+// recent one for that key.
+//
+// The cost is unchanged: the same scan of the same window, one more grouping
+// key. What does change is the row count, which is why the callers raise the
+// limit — see actionFanout.
+func breakdownStats(by string) string {
+	return "stats count() as n, max(@timestamp) as lastTs by " + by + ", action\n| sort n desc\n"
+}
+
+// ByMethod counts requests per HTTP method and action.
 func (q WAFQueries) ByMethod() Query {
 	return Query{
 		ID:   "waf.byMethod",
-		Text: "stats count() as n by httpRequest.httpMethod as method\n| sort n desc",
+		Text: breakdownStats("httpRequest.httpMethod as method"),
 	}
 }
 
-// ByPath counts requests per URI and query string. The two are reported as
-// separate columns rather than concatenated so the UI can offer a copy button
-// for each.
+// ByPath counts requests per URI, query string and action. The URI and the args
+// are reported as separate columns rather than concatenated so the UI can offer
+// a copy button for each.
 func (q WAFQueries) ByPath(limit int) Query {
 	return Query{
 		ID: "waf.byPath",
-		Text: "stats count() as n by httpRequest.uri as uri, httpRequest.args as args\n" +
-			"| sort n desc\n" +
+		Text: breakdownStats("httpRequest.uri as uri, httpRequest.args as args") +
 			fmt.Sprintf("| limit %d", limit),
 		Limit: limit,
 	}
@@ -383,14 +398,20 @@ func (q WAFQueries) Blocked(limit int) Query {
 	}
 }
 
-// BlockedList returns individual blocked requests, newest first.
-func (q WAFQueries) BlockedList(limit int) Query {
+// RecentList returns individual requests, newest first, each with the action
+// the WAF took on it.
+//
+// It is deliberately not filtered to blocked requests. What a rule blocked is
+// already summarised by Blocked; what this answers is the other question — is
+// traffic arriving at all, and is it getting through — which a list of blocks
+// alone cannot, because an empty one means either "nothing was blocked" or
+// "nothing arrived".
+func (q WAFQueries) RecentList(limit int) Query {
 	return Query{
-		ID: "waf.blocked.list",
-		Text: "fields @timestamp, terminatingRuleId as rule, httpRequest.clientIp as clientIp,\n" +
+		ID: "waf.recent.list",
+		Text: "fields @timestamp, action, terminatingRuleId as rule, httpRequest.clientIp as clientIp,\n" +
 			"       httpRequest.country as country, httpRequest.httpMethod as method,\n" +
 			"       httpRequest.uri as uri, httpRequest.args as args\n" +
-			"| filter action = 'BLOCK'\n" +
 			"| sort @timestamp desc\n" +
 			fmt.Sprintf("| limit %d", limit),
 		Limit: limit,
@@ -402,7 +423,7 @@ func (q WAFQueries) BlockedList(limit int) Query {
 // without escaping surprises.
 var headerNameRe = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+.^_` + "`" + `|~-]+$`)
 
-// ByHeader counts the distinct values of one request header.
+// ByHeader counts the distinct values of one request header, per action.
 //
 // WAF stores headers as an array of {name, value} objects. Logs Insights cannot
 // group by an array element, and indexing by position (headers.0.value) is
@@ -419,8 +440,7 @@ func (q WAFQueries) ByHeader(name string, limit int) (Query, error) {
 		ID: "waf.byHeader." + strings.ToLower(name),
 		Text: fmt.Sprintf("parse @message /%s/\n", pattern) +
 			"| filter ispresent(headerValue)\n" +
-			"| stats count() as n by headerValue as value\n" +
-			"| sort n desc\n" +
+			"| " + breakdownStats("headerValue as value") +
 			fmt.Sprintf("| limit %d", limit),
 		Limit: limit,
 	}, nil

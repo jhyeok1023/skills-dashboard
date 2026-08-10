@@ -2,6 +2,7 @@
 	import { REFRESH_CHOICES, timeRange } from '$lib/timerange.svelte';
 	import { formatTimestamp } from '$lib/format';
 	import type { WindowJSON } from '$lib/types';
+	import LastUpdated from './LastUpdated.svelte';
 
 	/**
 	 * The range and period selector.
@@ -18,9 +19,11 @@
 	interface Props {
 		window?: WindowJSON | null;
 		loading?: boolean;
+		/** Epoch milliseconds of the last successful load. */
+		lastLoadedAt?: number | null;
 	}
 
-	let { window: win = null, loading = false }: Props = $props();
+	let { window: win = null, loading = false, lastLoadedAt = null }: Props = $props();
 </script>
 
 <div class="picker row" data-testid="time-range-picker">
@@ -65,32 +68,79 @@
 		</select>
 	</label>
 
-	<button type="button" class="control" onclick={() => timeRange.refresh()} disabled={loading}>
-		{loading ? '조회 중…' : '새로고침'}
+	<!--
+		The label does not change while a refresh runs. Swapping it for "조회 중…"
+		re-measured the button and nudged everything beside it; the spinner is a
+		fixed-size box that is either spinning or invisible, so the row never
+		moves. The data already on screen stays put underneath.
+	-->
+	<button
+		type="button"
+		class="control refresh"
+		onclick={() => timeRange.refresh()}
+		disabled={loading}
+	>
+		<span class="spin-slot" aria-hidden="true">
+			{#if loading}<span class="spinner"></span>{/if}
+		</span>
+		<span>새로고침</span>
+		<span class="sr">{loading ? '조회 중' : ''}</span>
 	</button>
 
-	{#if win}
-		<span class="span tiny muted" data-value>
-			{formatTimestamp(win.start)} – {formatTimestamp(win.end)} · {win.period}초 버킷
-		</span>
-	{/if}
+	<div class="meta row">
+		<LastUpdated at={lastLoadedAt} />
+		{#if win}
+			<span class="span tiny muted" data-value>
+				{formatTimestamp(win.start)} – {formatTimestamp(win.end)} · {win.period}초 버킷
+			</span>
+		{/if}
+	</div>
 </div>
 
 <style>
 	.picker {
-		gap: 12px;
+		gap: 6px 10px;
 		align-items: center;
 	}
 
 	.gap-tight {
+		gap: 4px;
+	}
+
+	.refresh {
+		display: inline-flex;
+		align-items: center;
 		gap: 5px;
+	}
+
+	/* Reserved whether or not it is spinning, so starting a refresh does not
+	   reflow the control row. */
+	.spin-slot {
+		display: inline-flex;
+		width: 9px;
+		height: 9px;
+		flex: none;
+	}
+
+	.meta {
+		margin-left: auto;
+		gap: 4px 10px;
+		justify-content: flex-end;
 	}
 
 	.span {
 		font-variant-numeric: tabular-nums;
-		margin-left: auto;
 		/* The window description wraps onto its own line on a narrow viewport
 		   rather than being clipped. */
 		overflow-wrap: anywhere;
+	}
+
+	.sr {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip-path: inset(50%);
+		white-space: nowrap;
 	}
 </style>

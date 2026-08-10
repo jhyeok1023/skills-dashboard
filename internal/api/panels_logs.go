@@ -497,9 +497,11 @@ func (s *Service) buildWAFTrafficPanel(rc requestCtx) (*domain.Panel, error) {
 	panel := &domain.Panel{ID: "waf-traffic", Title: "WAF 트래픽"}
 	q := domain.WAFQueries{Headers: rc.cfg.WAFHeaders}
 
+	limit := rc.cfg.Limits.LogRows
 	series := q.ActionSeries(rc.w)
+	recent := q.RecentList(limit)
 	src := s.wafLogs(rc)
-	results, errs := s.runLogQueries(rc, src, "waf-traffic", []domain.Query{series})
+	results, errs := s.runLogQueries(rc, src, "waf-traffic", []domain.Query{series, recent})
 	noteQueryErrors(panel, src, errs)
 
 	byAction := map[string]*domain.Series{}
@@ -537,51 +539,89 @@ func (s *Service) buildWAFTrafficPanel(rc requestCtx) (*domain.Panel, error) {
 		actions = append(actions, a)
 	}
 	sort.Strings(actions)
+	var overall float64
 	for _, a := range actions {
 		panel.Series = append(panel.Series, byAction[a])
+		overall += totals[a]
+		// No intent. A WAF that blocks traffic is a WAF doing its job, so
+		// tagging BLOCK as "bad" put the dashboard in a permanent alarm state
+		// and made a genuine surge indistinguishable from a normal Tuesday.
+		// The action is carried by its colour and glyph instead.
 		panel.Stats = append(panel.Stats, domain.Stat{
 			Key: "waf.log." + strings.ToLower(a), Label: a, Unit: domain.UnitCount,
 			Value: domain.P(totals[a]), Basis: "WAF 로그 action 집계 (전체)",
-			Intent: wafActionIntent(a),
 		})
 	}
+
+	var rows []domain.Row
+	if res, ok := results[recent.ID]; ok {
+		for _, r := range res.Rows {
+			rows = append(rows, domain.Row{
+				"timestamp": r["@timestamp"],
+				"action":    r["action"],
+				"rule":      r["rule"],
+				"clientIp":  r["clientIp"],
+				"country":   r["country"],
+				"method":    r["method"],
+				"uri":       r["uri"],
+				"args":      r["args"],
+			})
+		}
+	}
+
+	// The total is the action series' own sum, counted over the whole window and
+	// entirely independently of this list. That is what lets the list stop at
+	// the row cap without the count above it stopping too.
+	//
+	// No Bars: these are individual requests, not a distribution. Drawing bars
+	// from them would put a chart on screen whose bar heights are all 1.
+	panel.Table = domain.NewTable([]domain.Column{
+		{Key: "timestamp", Label: "시각", Mono: true},
+		{Key: "action", Label: "처리"},
+		{Key: "method", Label: "메소드"},
+		{Key: "uri", Label: "경로", Mono: true, Copyable: true},
+		{Key: "args", Label: "쿼리", Mono: true, Copyable: true},
+		{Key: "clientIp", Label: "클라이언트", Mono: true, Copyable: true},
+		{Key: "country", Label: "국가"},
+		{Key: "rule", Label: "룰", Copyable: true},
+	}, rows, honestTotal(overall, len(rows)), limit)
+
 	noteQueryCost(panel, results)
 	return panel, nil
 }
 
+// wafActionColor fixes one colour per WAF action, for every panel that shows
+// one. The frontend aliases these as --waf-allow, --waf-block and so on, and
+// draws a distinct glyph beside each, so the action is still readable when the
+// colours are not.
+//
+// CAPTCHA and CHALLENGE are named rather than left to the default. They used to
+// share the fallback with an empty action, so three different outcomes were
+// drawn as one indistinguishable yellow.
 func wafActionColor(action string) string {
 	switch strings.ToUpper(action) {
 	case "ALLOW":
 		return domain.ColorGreen
 	case "BLOCK":
 		return domain.ColorPink
-	case "COUNT":
+	case "COUNT", "EXCLUDED_AS_COUNT":
 		return domain.ColorGray
+	case "CHALLENGE":
+		return domain.ColorOrange
+	case "CAPTCHA":
+		return domain.ColorPurple
 	default:
 		return domain.ColorYellow
-	}
-}
-
-func wafActionIntent(action string) domain.Intent {
-	switch strings.ToUpper(action) {
-	case "ALLOW":
-		return domain.IntentGood
-	case "BLOCK":
-		return domain.IntentBad
-	default:
-		return domain.IntentNeutral
 	}
 }
 
 func (s *Service) buildWAFBlockedPanel(rc requestCtx) (*domain.Panel, error) {
 	panel := &domain.Panel{ID: "waf-blocked", Title: "차단된 요청"}
 	q := domain.WAFQueries{Headers: rc.cfg.WAFHeaders}
-	limit := rc.cfg.Limits.LogRows
 
 	agg := q.Blocked(rc.cfg.Limits.TopN)
-	list := q.BlockedList(limit)
 	src := s.wafLogs(rc)
-	results, errs := s.runLogQueries(rc, src, "waf-blocked", []domain.Query{agg, list})
+	results, errs := s.runLogQueries(rc, src, "waf-blocked", []domain.Query{agg})
 	noteQueryErrors(panel, src, errs)
 
 	var rows []domain.Row
@@ -606,34 +646,107 @@ func (s *Service) buildWAFBlockedPanel(rc requestCtx) (*domain.Panel, error) {
 	}, rows, honestTotal(listTotal, len(rows)), rc.cfg.Limits.TopN)
 	panel.Bars = &domain.Bars{KeyColumn: "rule", ValueColumn: "count"}
 
-	if res, ok := results[list.ID]; ok && len(res.Rows) > 0 {
-		var recent []domain.Row
-		for _, r := range res.Rows {
-			recent = append(recent, domain.Row{
-				"timestamp": r["@timestamp"],
-				"rule":      r["rule"],
-				"clientIp":  r["clientIp"],
-				"country":   r["country"],
-				"method":    r["method"],
-				"uri":       r["uri"],
-				"args":      r["args"],
-			})
-		}
-		panel.Warn("최근 차단 요청 %d건을 함께 조회했습니다.", len(recent))
-	}
+	// The per-request list that used to be fetched here and thrown away now
+	// lives on waf-traffic, where it is actually rendered — and where it covers
+	// every action rather than only blocks. This panel's scan count is one
+	// lower than it was, and the page's is unchanged.
 	noteQueryCost(panel, results)
 	return panel, nil
+}
+
+// actionFanout is how much room the breakdown queries are given on top of the
+// number of keys the table will show.
+//
+// Each breakdown now groups by action as well as by its own key, so a single
+// path occupies one row per action it was ever given. Without the headroom the
+// query's own limit would decide which keys survive — and it would decide by
+// (key, action) volume, so a path with a big ALLOW row and a small BLOCK row
+// could arrive with the block silently missing, which is the one number the
+// breakdown exists to show.
+const actionFanout = 4
+
+// wafBucket is one breakdown key with its per-action split folded back
+// together.
+type wafBucket struct {
+	key                 string
+	allow, block, other float64
+	total               float64
+	lastAction          string
+	lastTs              string
+}
+
+// pivotWAFActions folds (key, action) rows into one bucket per key, busiest
+// first.
+//
+// The per-action counts are summed here rather than in the query because Logs
+// Insights has no conditional aggregate: asking for "count where action=BLOCK"
+// alongside "count where action=ALLOW" in one stats command is not expressible,
+// and asking for them as two commands is two scans of the same bytes.
+func pivotWAFActions(rows []map[string]string, keyOf func(map[string]string) string) []wafBucket {
+	index := map[string]int{}
+	var out []wafBucket
+
+	for _, r := range rows {
+		key := keyOf(r)
+		if key == "" {
+			continue
+		}
+		n, ok := rowFloat(r, "n")
+		if !ok {
+			continue
+		}
+		i, seen := index[key]
+		if !seen {
+			i = len(out)
+			index[key] = i
+			out = append(out, wafBucket{key: key})
+		}
+		b := &out[i]
+
+		action := strings.ToUpper(strings.TrimSpace(r["action"]))
+		switch action {
+		case "ALLOW":
+			b.allow += n
+		case "BLOCK":
+			b.block += n
+		default:
+			// COUNT, CHALLENGE, CAPTCHA and anything a future WAF version adds.
+			// Lumped rather than dropped: the columns have to add up to the
+			// total, or the table invites the reader to work out the difference
+			// and find it means nothing.
+			b.other += n
+		}
+		b.total += n
+
+		// Insights renders @timestamp as a fixed-width "YYYY-MM-DD hh:mm:ss.SSS",
+		// so lexical order is chronological order and no parse is needed. An
+		// empty action still wins the comparison if it is genuinely the newest —
+		// it is reported as it was recorded rather than quietly skipped.
+		if ts := r["lastTs"]; ts > b.lastTs {
+			b.lastTs = ts
+			b.lastAction = action
+		}
+	}
+
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].total != out[j].total {
+			return out[i].total > out[j].total
+		}
+		return out[i].key < out[j].key
+	})
+	return out
 }
 
 func (s *Service) buildWAFBreakdownPanel(rc requestCtx) (*domain.Panel, error) {
 	panel := &domain.Panel{ID: "waf-breakdown", Title: "WAF 통계"}
 	q := domain.WAFQueries{Headers: rc.cfg.WAFHeaders}
 	topN := rc.cfg.Limits.TopN
+	fetch := topN * actionFanout
 
-	queries := []domain.Query{q.ByMethod(), q.ByPath(topN)}
+	queries := []domain.Query{q.ByMethod(), q.ByPath(fetch)}
 	headerQueries := map[string]string{}
 	for _, h := range rc.cfg.WAFHeaders {
-		hq, err := q.ByHeader(h, topN)
+		hq, err := q.ByHeader(h, fetch)
 		if err != nil {
 			panel.Warn("헤더 %q 통계를 만들 수 없습니다: %v", h, err)
 			continue
@@ -646,42 +759,75 @@ func (s *Service) buildWAFBreakdownPanel(rc requestCtx) (*domain.Panel, error) {
 	results, errs := s.runLogQueries(rc, src, "waf-breakdown", queries)
 	noteQueryErrors(panel, src, errs)
 
-	// The breakdowns are rendered as one table each; the panel carries the
-	// method breakdown and reports the others as separate rows so every value
-	// stays copyable.
+	// Every breakdown becomes rows of the one table, tagged by which breakdown
+	// it came from, so each value keeps its own copy button.
 	var rows []domain.Row
 	var total float64
-	if res, ok := results["waf.byMethod"]; ok {
-		for _, r := range res.Rows {
-			n, _ := rowFloat(r, "n")
-			total += n
-			rows = append(rows, domain.Row{"dimension": "method", "key": r["method"], "count": r["n"]})
+	// keysFound counts what the breakdowns actually distinguished, before the
+	// per-dimension cap. The table's total is that, not the number of rows on
+	// screen — a capped list must not shrink the count printed beside it.
+	var keysFound int
+
+	add := func(dimension string, buckets []wafBucket) {
+		keysFound += len(buckets)
+		if len(buckets) > topN {
+			buckets = buckets[:topN]
+		}
+		for _, b := range buckets {
+			rows = append(rows, domain.Row{
+				"dimension":  dimension,
+				"key":        b.key,
+				"allow":      b.allow,
+				"block":      b.block,
+				"other":      b.other,
+				"count":      b.total,
+				"lastAction": b.lastAction,
+			})
 		}
 	}
+
+	if res, ok := results["waf.byMethod"]; ok {
+		buckets := pivotWAFActions(res.Rows, func(r map[string]string) string { return r["method"] })
+		for _, b := range buckets {
+			total += b.total
+		}
+		add("method", buckets)
+	}
 	if res, ok := results["waf.byPath"]; ok {
-		for _, r := range res.Rows {
+		add("path", pivotWAFActions(res.Rows, func(r map[string]string) string {
 			key := r["uri"]
 			if r["args"] != "" {
 				key += "?" + r["args"]
 			}
-			rows = append(rows, domain.Row{"dimension": "path", "key": key, "count": r["n"]})
-		}
+			return key
+		}))
 	}
-	for id, name := range headerQueries {
+	// Sorted, because ranging a map would reorder the header breakdowns between
+	// two otherwise identical responses.
+	headerIDs := make([]string, 0, len(headerQueries))
+	for id := range headerQueries {
+		headerIDs = append(headerIDs, id)
+	}
+	sort.Strings(headerIDs)
+	for _, id := range headerIDs {
 		res, ok := results[id]
 		if !ok {
 			continue
 		}
-		for _, r := range res.Rows {
-			rows = append(rows, domain.Row{"dimension": "header:" + name, "key": r["value"], "count": r["n"]})
-		}
+		add("header:"+headerQueries[id], pivotWAFActions(res.Rows, func(r map[string]string) string {
+			return r["value"]
+		}))
 	}
 
 	panel.Table = domain.NewTable([]domain.Column{
 		{Key: "dimension", Label: "구분"},
 		{Key: "key", Label: "값", Mono: true, Copyable: true},
-		{Key: "count", Label: "건수", Numeric: true},
-	}, rows, honestTotal(float64(len(rows)), len(rows)), topN)
+		{Key: "allow", Label: "허용", Numeric: true},
+		{Key: "block", Label: "차단", Numeric: true},
+		{Key: "other", Label: "기타", Numeric: true},
+		{Key: "count", Label: "합계", Numeric: true},
+		{Key: "lastAction", Label: "마지막 처리"},
+	}, rows, honestTotal(float64(keysFound), len(rows)), topN)
 
 	// The bars and the table are two renderings of these same rows, so the
 	// chart cannot end up counting something different from the list under it.

@@ -93,8 +93,14 @@ func PodResourceMetrics() []MetricSpec {
 }
 
 // NodeResourceMetrics covers requirement 5.
+//
+// InstanceId belongs in the schema even though nothing pins it: Container
+// Insights publishes the node metrics under {NodeName, ClusterName, InstanceId}
+// and {ClusterName}, and nothing else. A SEARCH schema is matched as a set, so
+// {ClusterName,NodeName} matched no metric at all and the panel rendered empty
+// — indistinguishable from a cluster with Container Insights switched off.
 func NodeResourceMetrics() []MetricSpec {
-	dims := []string{"ClusterName", "NodeName"}
+	dims := []string{"ClusterName", "InstanceId", "NodeName"}
 	return []MetricSpec{
 		{Key: "node.cpu", Label: "CPU 사용률", Namespace: NSContainer, MetricName: "node_cpu_utilization", Stat: StatAvg, Unit: UnitPercent, Color: ColorIndigo, Dimensions: dims},
 		{Key: "node.mem", Label: "메모리 사용률", Namespace: NSContainer, MetricName: "node_memory_utilization", Stat: StatAvg, Unit: UnitPercent, Color: ColorTeal, Dimensions: dims},
@@ -113,11 +119,18 @@ func CountMetrics() []MetricSpec {
 
 // PodStatusMetrics covers requirement 7.
 //
-// Container Insights has no OOMKilled metric. Restarts are the closest signal
-// it publishes, and the OOM count shown beside them comes from matching the
-// pod log stream instead — a limitation the UI states rather than papers over.
+// PodName is in the schema because none of these metrics is published at
+// {Namespace, ClusterName}: the pod-level set is {PodName, Namespace,
+// ClusterName}. The panel sums the fan-out back down, so the numbers mean the
+// same thing they were meant to; without PodName they meant nothing, because
+// the SEARCH matched no series.
+//
+// pod_status_* is published only by Container Insights with enhanced
+// observability. pod_number_of_container_restarts is published by both, which
+// is why the panel can still say something on a cluster running the older
+// agent.
 func PodStatusMetrics() []MetricSpec {
-	dims := []string{"ClusterName", "Namespace"}
+	dims := []string{"ClusterName", "Namespace", "PodName"}
 	return []MetricSpec{
 		{Key: "pod.running", Label: "Running", Namespace: NSContainer, MetricName: "pod_status_running", Stat: StatAvg, Unit: UnitCount, Color: ColorGreen, Intent: IntentGood, Dimensions: dims},
 		{Key: "pod.pending", Label: "Pending", Namespace: NSContainer, MetricName: "pod_status_pending", Stat: StatAvg, Unit: UnitCount, Color: ColorOrange, Intent: IntentWarn, Dimensions: dims},
@@ -143,10 +156,26 @@ func RDSProxyMetrics() []MetricSpec {
 func WAFMetrics() []MetricSpec {
 	dims := []string{"WebACL", "Rule", "Region"}
 	return []MetricSpec{
-		{Key: "waf.allowed", Label: "허용", Namespace: NSWAFV2, MetricName: "AllowedRequests", Stat: StatSum, Unit: UnitCount, Color: ColorGreen, Intent: IntentGood, Dimensions: dims},
-		{Key: "waf.blocked", Label: "차단", Namespace: NSWAFV2, MetricName: "BlockedRequests", Stat: StatSum, Unit: UnitCount, Color: ColorPink, Intent: IntentBad, Dimensions: dims},
+		// No intent on either: a WAF blocking requests is the normal operating
+		// state, so flagging it permanently lit the alarm and buried the cases
+		// that actually deviate. Colour still separates the two.
+		{Key: "waf.allowed", Label: "허용", Namespace: NSWAFV2, MetricName: "AllowedRequests", Stat: StatSum, Unit: UnitCount, Color: ColorGreen, Dimensions: dims},
+		{Key: "waf.blocked", Label: "차단", Namespace: NSWAFV2, MetricName: "BlockedRequests", Stat: StatSum, Unit: UnitCount, Color: ColorPink, Dimensions: dims},
 		{Key: "waf.counted", Label: "카운트", Namespace: NSWAFV2, MetricName: "CountedRequests", Stat: StatSum, Unit: UnitCount, Color: ColorGray, Dimensions: dims},
 	}
+}
+
+// SpecsWithPrefix picks the specs whose key begins with prefix, so a panel can
+// plot CPU without memory sharing its chart. The keys already nest — pod.cpu
+// carries pod.cpu.limit with it — so one prefix names a whole resource.
+func SpecsWithPrefix(specs []MetricSpec, prefix string) []MetricSpec {
+	out := make([]MetricSpec, 0, len(specs))
+	for _, s := range specs {
+		if strings.HasPrefix(s.Key, prefix) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // AllMetrics is every spec the dashboard knows about, used to assert that keys
