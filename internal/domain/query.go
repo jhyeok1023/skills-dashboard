@@ -54,6 +54,41 @@ func (q LogQueries) namespaceFilter() (string, error) {
 	return fmt.Sprintf("| filter kubernetes.namespace_name = %s\n", quote(q.Format.Namespace)), nil
 }
 
+// excludePathFilter drops probe traffic from a pod-log query.
+//
+// The guard on ispresent matters: a comparison against a field a record does
+// not carry matches nothing in Logs Insights, so an unguarded `path not in
+// [...]` would silently discard every plain log line — the ERROR and WARN
+// output would simply go empty, which is a much worse failure than the noise
+// this is meant to remove.
+func (q LogQueries) excludePathFilter() (string, error) {
+	if len(q.Format.ExcludePaths) == 0 || q.Format.PathField == "" {
+		return "", nil
+	}
+	path, err := q.processedField(q.Format.PathField)
+	if err != nil {
+		return "", fmt.Errorf("pathField: %w", err)
+	}
+
+	// Exact match, deliberately. A substring or prefix rule would be the kind
+	// of thing that quietly swallows /healthy-users, and it would have to be
+	// reimplemented identically in Go for the settings preview to agree with
+	// the query. An explicit list stays predictable and stays in step.
+	exact := make([]string, 0, len(q.Format.ExcludePaths))
+	for _, p := range q.Format.ExcludePaths {
+		if p == "" {
+			continue
+		}
+		exact = append(exact, quote(p))
+	}
+	if len(exact) == 0 {
+		return "", nil
+	}
+
+	return fmt.Sprintf("| filter not ispresent(%s) or %s not in [%s]\n",
+		path, path, strings.Join(exact, ", ")), nil
+}
+
 func (q LogQueries) processedField(name string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("field is not configured")
@@ -89,10 +124,15 @@ func (q LogQueries) PodTraffic(w Window) (Query, error) {
 	if err != nil {
 		return Query{}, err
 	}
+	probes, err := q.excludePathFilter()
+	if err != nil {
+		return Query{}, err
+	}
 
 	var b strings.Builder
 	b.WriteString("fields @timestamp\n")
 	b.WriteString(ns)
+	b.WriteString(probes)
 	fmt.Fprintf(&b, "| filter ispresent(%s) or ispresent(%s)\n", status, latency)
 	fmt.Fprintf(&b, "| stats count(%s) as requests,\n", status)
 	fmt.Fprintf(&b, "        count(%s) as latencySamples,\n", latency)
@@ -121,10 +161,15 @@ func (q LogQueries) PodBadStatusSeries(w Window) (Query, error) {
 	if err != nil {
 		return Query{}, err
 	}
+	probes, err := q.excludePathFilter()
+	if err != nil {
+		return Query{}, err
+	}
 
 	var b strings.Builder
 	b.WriteString("fields @timestamp\n")
 	b.WriteString(ns)
+	b.WriteString(probes)
 	fmt.Fprintf(&b, "| filter ispresent(%s) and %s\n", status, notInStatuses(status, q.Format.OKStatuses))
 	fmt.Fprintf(&b, "| stats count() as n by bin(%s) as t, %s as status, %s as path\n", w.Period, status, path)
 	b.WriteString("| sort t asc")
@@ -147,10 +192,15 @@ func (q LogQueries) PodBadStatusList(w Window, limit int) (Query, error) {
 	if err != nil {
 		return Query{}, err
 	}
+	probes, err := q.excludePathFilter()
+	if err != nil {
+		return Query{}, err
+	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "fields @timestamp, %s\n", strings.Join(fields, ", "))
 	b.WriteString(ns)
+	b.WriteString(probes)
 	fmt.Fprintf(&b, "| filter ispresent(%s) and %s\n", status, notInStatuses(status, q.Format.OKStatuses))
 	b.WriteString("| sort @timestamp desc\n")
 	fmt.Fprintf(&b, "| limit %d", limit)
@@ -169,10 +219,15 @@ func (q LogQueries) PodErrorSeries(w Window) (Query, error) {
 	if err != nil {
 		return Query{}, err
 	}
+	probes, err := q.excludePathFilter()
+	if err != nil {
+		return Query{}, err
+	}
 
 	var b strings.Builder
 	b.WriteString("fields @timestamp\n")
 	b.WriteString(ns)
+	b.WriteString(probes)
 	b.WriteString(filter)
 	fmt.Fprintf(&b, "| stats count() as n by bin(%s) as t, level\n", w.Period)
 	b.WriteString("| sort t asc")
@@ -193,10 +248,15 @@ func (q LogQueries) PodErrorList(w Window, limit int) (Query, error) {
 	if err != nil {
 		return Query{}, fmt.Errorf("messageField: %w", err)
 	}
+	probes, err := q.excludePathFilter()
+	if err != nil {
+		return Query{}, err
+	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "fields @timestamp, %s, kubernetes.pod_name as pod, kubernetes.container_name as container\n", msg)
 	b.WriteString(ns)
+	b.WriteString(probes)
 	b.WriteString(filter)
 	b.WriteString("| sort @timestamp desc\n")
 	fmt.Fprintf(&b, "| limit %d", limit)

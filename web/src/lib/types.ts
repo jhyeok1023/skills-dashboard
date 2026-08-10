@@ -133,6 +133,8 @@ export interface LogFormat {
 	levelPattern: string;
 	namespace: string;
 	okStatuses: number[];
+	/** Request paths dropped from every pod-log panel. Matched exactly. */
+	excludePaths: string[];
 }
 
 export interface Config {
@@ -184,6 +186,8 @@ export interface LogFormatPreview {
 	parsed: LogLine;
 	matched: boolean;
 	badStatus: boolean;
+	/** The line's path is on the exclusion list, so no panel would show it. */
+	excluded: boolean;
 	suggestion?: string;
 }
 

@@ -274,6 +274,20 @@ test('the log format preview reports what a sample line parsed to', async ({ pag
 	await expect(preview.locator('text=503')).toBeVisible();
 });
 
+// Health-check traffic is filtered out, so the stats have to say so — a count
+// that quietly drops a slice of the traffic is worse than one that is wrong.
+test('excluded paths are stated beside the numbers and editable in settings', async ({ page }) => {
+	await open(page, '/logs/pod');
+	const basis = await page.locator('[data-stat="pod.requests.total"] .basis').innerText();
+	expect(basis).toContain('/health');
+	expect(basis).toContain('제외');
+
+	await open(page, '/settings');
+	const field = page.locator('#excludePaths');
+	await expect(field).toBeVisible();
+	await expect(field).toHaveValue('/health, /healthcheck');
+});
+
 for (const width of [1440, 1024, 768]) {
 	test(`nothing clips at ${width}px wide`, async ({ page }) => {
 		await page.setViewportSize({ width, height: 900 });

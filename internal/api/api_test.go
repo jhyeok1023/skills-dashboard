@@ -476,6 +476,127 @@ func TestLatencyPanelSeparatesItsTwoRequestPopulations(t *testing.T) {
 	}
 }
 
+// Health-check traffic is dropped in the query, so the bytes are never scanned
+// and every count on the panel already has it removed.
+func TestHealthCheckPathsAreExcludedFromPodLogQueries(t *testing.T) {
+	svc, h := newTestService(t)
+
+	if rec := get(t, h, "/api/page/pod-logs?range=1h&period=5m"); rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+
+	logs := svc.Clients.Logs.(*stubLogs)
+	logs.mu.Lock()
+	started := append([]string(nil), logs.starts...)
+	logs.mu.Unlock()
+
+	if len(started) == 0 {
+		t.Fatal("no queries were issued")
+	}
+	for _, q := range started {
+		if !strings.Contains(q, "log_processed.path not in ['/health', '/healthcheck']") {
+			t.Errorf("a pod-log query does not exclude probe traffic:\n%s", q)
+		}
+	}
+}
+
+// A count that silently drops part of the traffic is worse than one that is
+// merely wrong: nothing on screen hints that it happened.
+func TestStatsSayThatHealthChecksWereExcluded(t *testing.T) {
+	_, h := newTestService(t)
+	payload := decodePayload(t, get(t, h, "/api/page/pod-logs?range=1h&period=5m"))
+
+	checked := 0
+	for _, panel := range payload.Panels {
+		for _, s := range panel.Stats {
+			if s.Key == "insights.bytesScanned" {
+				continue
+			}
+			if !strings.Contains(s.Basis, "/health") {
+				t.Errorf("stat %q does not mention the excluded paths: %q", s.Key, s.Basis)
+			}
+			checked++
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no stats were examined")
+	}
+}
+
+func TestExclusionCanBeClearedFromTheSettings(t *testing.T) {
+	svc, h := newTestService(t)
+	cfg := svc.Store.Get()
+	cfg.LogFormat.ExcludePaths = nil
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := svc.Store.Get().LogFormat.ExcludePaths; len(got) != 0 {
+		t.Fatalf("clearing the list was undone by defaults: %v", got)
+	}
+
+	logs := svc.Clients.Logs.(*stubLogs)
+	logs.mu.Lock()
+	logs.starts = nil
+	logs.mu.Unlock()
+
+	if rec := get(t, h, "/api/page/pod-logs?range=1h&period=5m"); rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	logs.mu.Lock()
+	started := append([]string(nil), logs.starts...)
+	logs.mu.Unlock()
+
+	for _, q := range started {
+		if strings.Contains(q, "'/health'") {
+			t.Errorf("probe traffic was still filtered after the list was cleared:\n%s", q)
+		}
+	}
+}
+
+func TestLogFormatPreviewFlagsAnExcludedPath(t *testing.T) {
+	_, h := newTestService(t)
+	sample := `{"time":"2026-08-10T07:12:04Z","log":"x","log_processed":{"app":"api","latency_ms":2,"method":"GET","path":"/healthcheck","status":200},"kubernetes":{"namespace_name":"default","container_name":"api"}}`
+
+	body, err := json.Marshal(map[string]any{"sample": sample})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/logfmt/preview", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp logFormatPreviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Excluded {
+		t.Error("a /healthcheck line was not reported as excluded")
+	}
+	if resp.Suggestion == "" {
+		t.Error("nothing explained why the line will not appear in any panel")
+	}
+
+	// An ordinary path is not flagged.
+	body, err = json.Marshal(map[string]any{
+		"sample": strings.Replace(sample, "/healthcheck", "/v1/user", 1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/logfmt/preview", strings.NewReader(string(body))))
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Excluded {
+		t.Error("/v1/user was reported as excluded")
+	}
+}
+
 func TestRangeBeyondFourHoursIsRejected(t *testing.T) {
 	_, h := newTestService(t)
 	for _, q := range []string{"?range=8h", "?range=24h", "?range=6h&period=5m"} {

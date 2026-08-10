@@ -334,6 +334,26 @@ AWS_REGION=ap-northeast-2</pre>
 			</div>
 
 			<div class="field">
+				<label for="excludePaths">제외할 경로</label>
+				<input
+					id="excludePaths"
+					class="control mono"
+					value={config.logFormat.excludePaths.join(', ')}
+					onchange={(e) => {
+						config!.logFormat.excludePaths = (e.currentTarget as HTMLInputElement).value
+							.split(',')
+							.map((s) => s.trim())
+							.filter(Boolean);
+					}}
+				/>
+				<p class="tiny muted" data-value>
+					헬스체크처럼 항상 들어오는 요청을 팟 로그 집계에서 뺍니다. 쿼리 단계에서 걸러지므로 응답
+					시간 백분위와 요청 수, 비정상 응답 건수 모두에서 제외됩니다. 정확히 일치하는 경로만
+					제외되며, 비워 두면 아무것도 제외하지 않습니다.
+				</p>
+			</div>
+
+			<div class="field">
 				<label for="levelPattern">레벨 감지 정규식</label>
 				<input id="levelPattern" class="control mono" bind:value={config.logFormat.levelPattern} />
 			</div>
@@ -366,9 +386,14 @@ AWS_REGION=ap-northeast-2</pre>
 
 			{#if preview}
 				<div class="preview" data-testid="logfmt-preview">
-					<p class="badge" data-intent={preview.matched ? 'good' : 'warn'} data-value>
-						{preview.matched ? '인식됨' : '인식되지 않음'}
-					</p>
+					<div class="row">
+						<p class="badge" data-intent={preview.matched ? 'good' : 'warn'} data-value>
+							{preview.matched ? '인식됨' : '인식되지 않음'}
+						</p>
+						{#if preview.excluded}
+							<p class="badge" data-intent="warn" data-value>제외 경로</p>
+						{/if}
+					</div>
 					{#if preview.suggestion}
 						<p class="warning tiny" data-value>{preview.suggestion}</p>
 					{/if}

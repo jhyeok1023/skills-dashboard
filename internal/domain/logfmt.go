@@ -46,6 +46,21 @@ type LogFormat struct {
 	// surfaced in the bad-response panel.
 	OKStatuses []int `json:"okStatuses"`
 
+	// ExcludePaths are request paths dropped from every pod-log panel.
+	//
+	// Health checks are the reason this exists. A liveness probe every few
+	// seconds is usually the single largest source of request lines, and it
+	// drags the latency percentiles toward a route that does no work. Worse,
+	// when a probe starts failing it floods the bad-response table with
+	// thousands of identical rows and pushes the real failures past the row
+	// limit. Excluding them is a filter in the query, so the bytes are never
+	// scanned and the counts beside the charts already have them removed.
+	//
+	// Matching is exact. A prefix rule would quietly swallow /healthy-users,
+	// and it would have to be reimplemented identically in the query builder
+	// for the settings preview to agree with what actually gets filtered.
+	ExcludePaths []string `json:"excludePaths"`
+
 	compiledText  *regexp.Regexp
 	compiledLevel *regexp.Regexp
 }
@@ -71,7 +86,14 @@ func DefaultLogFormat() LogFormat {
 		LevelPattern: `(?i)\b(error|err|fatal|panic|warn|warning|oomkilled)\b`,
 		Namespace:    "default",
 		OKStatuses:   []int{200, 201},
+		ExcludePaths: DefaultExcludePaths(),
 	}
+}
+
+// DefaultExcludePaths are the probe endpoints excluded unless configured
+// otherwise.
+func DefaultExcludePaths() []string {
+	return []string{"/health", "/healthcheck"}
 }
 
 // Compile validates the configured patterns and caches them. It must be called
@@ -131,6 +153,21 @@ type LogLine struct {
 	// HasAccess reports whether this line carried request fields at all, so a
 	// plain log line is never counted as a zero-latency request.
 	HasAccess bool `json:"hasAccess"`
+}
+
+// IsExcludedPath reports whether a request path is filtered out of the pod-log
+// panels. It mirrors the query-side filter exactly, so the settings preview
+// tells the truth about what a sample line would do.
+func (f *LogFormat) IsExcludedPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	for _, p := range f.ExcludePaths {
+		if p != "" && path == p {
+			return true
+		}
+	}
+	return false
 }
 
 // IsBadStatus reports whether the line's response code falls outside the set

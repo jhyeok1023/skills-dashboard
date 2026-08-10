@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/jhyeok1023/skills-dashboard/internal/domain"
@@ -117,6 +118,12 @@ func (c *Config) Validate() error {
 	if len(c.LogFormat.OKStatuses) == 0 {
 		c.LogFormat.OKStatuses = domain.DefaultLogFormat().OKStatuses
 	}
+	// ExcludePaths is left alone when empty: an operator who cleared the list
+	// wants probe traffic back, and silently reinstating the defaults would
+	// make that impossible.
+	for i, p := range c.LogFormat.ExcludePaths {
+		c.LogFormat.ExcludePaths[i] = strings.TrimSpace(p)
+	}
 	if err := c.LogFormat.Validate(); err != nil {
 		return fmt.Errorf("logFormat: %w", err)
 	}
@@ -226,5 +233,6 @@ func (c Config) clone() Config {
 	out.WebACLs = append([]string(nil), c.WebACLs...)
 	out.WAFHeaders = append([]string(nil), c.WAFHeaders...)
 	out.LogFormat.OKStatuses = append([]int(nil), c.LogFormat.OKStatuses...)
+	out.LogFormat.ExcludePaths = append([]string(nil), c.LogFormat.ExcludePaths...)
 	return out
 }

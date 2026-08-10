@@ -50,21 +50,21 @@ const latencyPanel = {
 			label: '최대 p99',
 			value: 182.4,
 			unit: 'ms',
-			basis: 'latency_ms 가 있는 요청, 구간 전체'
+			basis: 'latency_ms 가 있는 요청, 구간 전체, /health · /healthcheck 제외'
 		},
 		{
 			key: 'pod.requests.total',
 			label: '요청 수',
 			value: 12840,
 			unit: 'count',
-			basis: 'status 가 있는 로그 라인'
+			basis: 'status 가 있는 로그 라인, /health · /healthcheck 제외'
 		},
 		{
 			key: 'pod.latencySamples.total',
 			label: '응답 시간 표본 수',
 			value: 12010,
 			unit: 'count',
-			basis: 'latency_ms 가 있는 로그 라인'
+			basis: 'latency_ms 가 있는 로그 라인, /health · /healthcheck 제외'
 		}
 	]
 };
@@ -421,7 +421,8 @@ const config = {
 		textPattern: '',
 		levelPattern: '(?i)\\b(error|err|fatal|panic|warn|warning|oomkilled)\\b',
 		namespace: 'default',
-		okStatuses: [200, 201]
+		okStatuses: [200, 201],
+		excludePaths: ['/health', '/healthcheck']
 	},
 	limits: meta.limits
 };
@@ -477,7 +478,8 @@ export async function mockApi(page: Page) {
 					hasAccess: true
 				},
 				matched: true,
-				badStatus: true
+				badStatus: true,
+				excluded: false
 			});
 		}
 

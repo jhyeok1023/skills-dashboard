@@ -180,6 +180,121 @@ func TestBadStatusListAndSeriesShareOneFilter(t *testing.T) {
 	}
 }
 
+// A liveness probe every few seconds is usually the largest single source of
+// request lines. Left in, it drags the latency percentiles toward a route that
+// does no work, and when it starts failing it floods the bad-response table
+// with identical rows that push the real failures past the row limit.
+func TestProbePathsAreExcludedFromEveryPodQuery(t *testing.T) {
+	q := LogQueries{Format: DefaultLogFormat()}
+	w := testWindow(t)
+
+	traffic, err := q.PodTraffic(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badSeries, err := q.PodBadStatusSeries(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badList, err := q.PodBadStatusList(w, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	errSeries, err := q.PodErrorSeries(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	errList, err := q.PodErrorList(w, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := "log_processed.path not in ['/health', '/healthcheck']"
+	for name, got := range map[string]Query{
+		"traffic":          traffic,
+		"badStatus.series": badSeries,
+		"badStatus.list":   badList,
+		"errors.series":    errSeries,
+		"errors.list":      errList,
+	} {
+		if !strings.Contains(got.Text, want) {
+			t.Errorf("%s does not exclude probe traffic:\n%s", name, got.Text)
+		}
+	}
+}
+
+// A comparison against a field a record does not carry matches nothing in Logs
+// Insights, so an unguarded exclusion would silently discard every plain log
+// line — the ERROR and WARN panels would simply go empty.
+func TestProbeExclusionKeepsLinesThatHaveNoPath(t *testing.T) {
+	q := LogQueries{Format: DefaultLogFormat()}
+	got, err := q.PodErrorList(testWindow(t), 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.Text, "not ispresent(log_processed.path) or") {
+		t.Errorf("the exclusion is not guarded on ispresent:\n%s", got.Text)
+	}
+}
+
+// The list and the aggregate beside it must exclude identically, or the header
+// count and the visible rows describe different populations again.
+func TestProbeExclusionIsIdenticalAcrossListAndAggregate(t *testing.T) {
+	f := DefaultLogFormat()
+	f.ExcludePaths = []string{"/health", "/healthz", "/readyz"}
+	q := LogQueries{Format: f}
+	w := testWindow(t)
+
+	series, err := q.PodBadStatusSeries(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := q.PodBadStatusList(w, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clause := "log_processed.path not in ['/health', '/healthz', '/readyz']"
+	if !strings.Contains(series.Text, clause) {
+		t.Errorf("aggregate:\n%s", series.Text)
+	}
+	if !strings.Contains(list.Text, clause) {
+		t.Errorf("list:\n%s", list.Text)
+	}
+}
+
+func TestProbeExclusionCanBeTurnedOff(t *testing.T) {
+	f := DefaultLogFormat()
+	f.ExcludePaths = nil
+	q := LogQueries{Format: f}
+
+	got, err := q.PodTraffic(testWindow(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got.Text, "not in ['/health'") {
+		t.Errorf("an empty exclusion list still filtered:\n%s", got.Text)
+	}
+	if strings.Contains(got.Text, "not in []") {
+		t.Errorf("an empty exclusion list produced a malformed filter:\n%s", got.Text)
+	}
+}
+
+// Excluded paths are operator input and must be quoted, not interpolated.
+func TestExcludedPathsAreQuoted(t *testing.T) {
+	f := DefaultLogFormat()
+	f.ExcludePaths = []string{`/health' | delete @message | filter '1`}
+	q := LogQueries{Format: f}
+
+	got, err := q.PodTraffic(testWindow(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.Text, `\'`) {
+		t.Errorf("an injected quote was not escaped:\n%s", got.Text)
+	}
+}
+
 func TestOKStatusesAreConfigurable(t *testing.T) {
 	f := DefaultLogFormat()
 	f.OKStatuses = []int{200, 201, 204, 304}

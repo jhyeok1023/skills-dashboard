@@ -206,6 +206,54 @@ func TestIsBadStatus(t *testing.T) {
 	}
 }
 
+// The preview on the settings page must agree with what the query actually
+// filters, so this mirrors the query-side rule exactly: equality, nothing else.
+func TestIsExcludedPath(t *testing.T) {
+	f := DefaultLogFormat()
+	tests := []struct {
+		path     string
+		excluded bool
+	}{
+		{"/health", true},
+		{"/healthcheck", true},
+		{"/v1/user", false},
+		{"", false},
+		// Deliberately not excluded: a prefix rule would swallow these, and
+		// nothing in the query does prefix matching either.
+		{"/healthy-users", false},
+		{"/health/live", false},
+		{"/api/health", false},
+		{"/HEALTH", false},
+	}
+	for _, tc := range tests {
+		if got := f.IsExcludedPath(tc.path); got != tc.excluded {
+			t.Errorf("IsExcludedPath(%q) = %v, want %v", tc.path, got, tc.excluded)
+		}
+	}
+
+	f.ExcludePaths = []string{"/healthz", "/readyz"}
+	if f.IsExcludedPath("/health") {
+		t.Error("/health excluded after it was removed from the list")
+	}
+	if !f.IsExcludedPath("/readyz") {
+		t.Error("/readyz not excluded despite being configured")
+	}
+
+	f.ExcludePaths = nil
+	if f.IsExcludedPath("/health") {
+		t.Error("an empty list still excluded something")
+	}
+}
+
+func TestDefaultExcludePathsCoverTheUsualProbes(t *testing.T) {
+	f := DefaultLogFormat()
+	for _, p := range []string{"/health", "/healthcheck"} {
+		if !f.IsExcludedPath(p) {
+			t.Errorf("%s is not excluded by default", p)
+		}
+	}
+}
+
 func TestValidateRejectsBadPatterns(t *testing.T) {
 	f := DefaultLogFormat()
 	f.LevelPattern = `(unclosed`

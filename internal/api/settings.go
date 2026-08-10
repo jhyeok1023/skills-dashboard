@@ -45,10 +45,15 @@ type logFormatPreviewRequest struct {
 }
 
 type logFormatPreviewResponse struct {
-	Parsed     domain.LogLine `json:"parsed"`
-	Matched    bool           `json:"matched"`
-	BadStatus  bool           `json:"badStatus"`
-	Suggestion string         `json:"suggestion,omitempty"`
+	Parsed    domain.LogLine `json:"parsed"`
+	Matched   bool           `json:"matched"`
+	BadStatus bool           `json:"badStatus"`
+	// Excluded reports that this line's path is on the exclusion list, so it
+	// would not reach any pod-log panel. Without it, an operator who mistyped
+	// an excluded path would only find out by noticing a panel is emptier than
+	// it should be.
+	Excluded   bool   `json:"excluded"`
+	Suggestion string `json:"suggestion,omitempty"`
 }
 
 // handleLogFormatPreview parses one pasted log line with the supplied format.
@@ -88,9 +93,13 @@ func (s *Service) handleLogFormatPreview(w http.ResponseWriter, r *http.Request)
 		Parsed:    line,
 		Matched:   line.HasAccess || line.Level != "",
 		BadStatus: format.IsBadStatus(line.Status),
+		Excluded:  format.IsExcludedPath(line.Path),
 	}
-	if !resp.Matched {
+	switch {
+	case !resp.Matched:
 		resp.Suggestion = "요청 필드도 레벨도 인식되지 않았습니다. latencyField/statusField 이름이나 textPattern 정규식을 확인하세요."
+	case resp.Excluded:
+		resp.Suggestion = "이 경로는 제외 목록에 있어 팟 로그 패널에 집계되지 않습니다."
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

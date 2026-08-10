@@ -80,6 +80,20 @@ func (s *Service) runLogQueries(rc requestCtx, logGroup, name string, qs []domai
 	return got.results, got.errs
 }
 
+// excludedPaths renders the probe-exclusion clause appended to every pod-log
+// stat's basis.
+//
+// A number that quietly drops a slice of the traffic is worse than one that is
+// merely wrong: nothing on screen hints that it happened. Naming the excluded
+// paths beside the value is what keeps "요청 수" honest once health checks stop
+// being counted.
+func excludedPaths(f domain.LogFormat) string {
+	if len(f.ExcludePaths) == 0 {
+		return ""
+	}
+	return ", " + strings.Join(f.ExcludePaths, " · ") + " 제외"
+}
+
 // noteQueryCost records what a set of Insights queries scanned. Insights bills
 // per byte, so the cost of a refresh is shown rather than left to a bill.
 func noteQueryCost(panel *domain.Panel, results map[string]awsx.QueryResult) {
@@ -194,21 +208,22 @@ func (s *Service) buildPodLatencyPanel(rc requestCtx) (*domain.Panel, error) {
 	// a status and a "요청 수" column from rows carrying a latency, labelled
 	// both the same way, and displayed them side by side. Here they come from
 	// one query, keep distinct names, and each says what it counted.
+	excluded := excludedPaths(rc.cfg.LogFormat)
 	panel.Stats = append(panel.Stats,
 		domain.Stat{
 			Key: "pod.p99.max", Label: "최대 p99", Unit: domain.UnitMillis,
 			Value: reduceAcross(p99s, (*domain.Series).Max, maxOf),
-			Basis: rc.cfg.LogFormat.LatencyField + " 가 있는 요청, 구간 전체",
+			Basis: rc.cfg.LogFormat.LatencyField + " 가 있는 요청, 구간 전체" + excluded,
 		},
 		domain.Stat{
 			Key: "pod.requests.total", Label: "요청 수", Unit: domain.UnitCount,
 			Value: domain.P(totalRequests),
-			Basis: rc.cfg.LogFormat.StatusField + " 가 있는 로그 라인",
+			Basis: rc.cfg.LogFormat.StatusField + " 가 있는 로그 라인" + excluded,
 		},
 		domain.Stat{
 			Key: "pod.latencySamples.total", Label: "응답 시간 표본 수", Unit: domain.UnitCount,
 			Value: domain.P(totalLatencySamples),
-			Basis: rc.cfg.LogFormat.LatencyField + " 가 있는 로그 라인",
+			Basis: rc.cfg.LogFormat.LatencyField + " 가 있는 로그 라인" + excluded,
 		},
 	)
 	noteQueryCost(panel, results)
@@ -308,8 +323,9 @@ func (s *Service) buildPodStatusCodePanel(rc requestCtx) (*domain.Panel, error) 
 	}
 	panel.Stats = append(panel.Stats, domain.Stat{
 		Key: "pod.badStatus.total", Label: "비정상 응답", Unit: domain.UnitCount,
-		Value:  domain.P(total),
-		Basis:  "상태 코드가 " + strings.Join(okList, ", ") + " 가 아닌 요청 (집계 전체)",
+		Value: domain.P(total),
+		Basis: "상태 코드가 " + strings.Join(okList, ", ") + " 가 아닌 요청 (집계 전체)" +
+			excludedPaths(rc.cfg.LogFormat),
 		Intent: domain.IntentBad,
 	})
 	noteQueryCost(panel, results)
@@ -414,11 +430,14 @@ func (s *Service) buildPodErrorPanel(rc requestCtx) (*domain.Panel, error) {
 		{Key: "message", Label: "메시지", Mono: true, Copyable: true},
 	}, rows, honestTotal(errTotal+warnTotal, len(rows)), limit)
 
+	excluded := excludedPaths(rc.cfg.LogFormat)
 	panel.Stats = append(panel.Stats,
 		domain.Stat{Key: "pod.error.total", Label: "ERROR", Unit: domain.UnitCount,
-			Value: domain.P(errTotal), Basis: "level 또는 메시지 패턴이 error 계열 (집계 전체)", Intent: domain.IntentBad},
+			Value: domain.P(errTotal),
+			Basis: "level 또는 메시지 패턴이 error 계열 (집계 전체)" + excluded, Intent: domain.IntentBad},
 		domain.Stat{Key: "pod.warn.total", Label: "WARN", Unit: domain.UnitCount,
-			Value: domain.P(warnTotal), Basis: "level 또는 메시지 패턴이 warn 계열 (집계 전체)", Intent: domain.IntentWarn},
+			Value: domain.P(warnTotal),
+			Basis: "level 또는 메시지 패턴이 warn 계열 (집계 전체)" + excluded, Intent: domain.IntentWarn},
 	)
 	noteQueryCost(panel, results)
 	return panel, nil
