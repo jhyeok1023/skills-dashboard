@@ -1,1 +1,15 @@
 .env
+.env.*
+!.env.example
+
+# Build output
+/dist/
+/internal/web/dist/*
+!/internal/web/dist/.gitkeep
+
+# Test artefacts
+/web/test-results/
+/web/playwright-report/
+/web/blob-report/
+/web/.svelte-kit/
+/web/build/

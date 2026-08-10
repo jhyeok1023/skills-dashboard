@@ -5,5 +5,15 @@ yarn.lock
 bun.lock
 bun.lockb
 
-# Miscellaneous
+# Vendored tooling. `mise run fmt` reformatted the Yarn release once; nothing
+# good comes of rewriting a file we did not author and do not maintain.
+/.yarn/
+/.pnp.cjs
+/.pnp.loader.mjs
+
+# Generated
 /static/
+/.svelte-kit/
+/build/
+/test-results/
+/playwright-report/

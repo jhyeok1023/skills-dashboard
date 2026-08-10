@@ -1,0 +1,148 @@
+/*
+ * Apple's system palette, expressed in oklch.
+ *
+ * The backend names a colour semantically (systemBlue, systemRed) and the
+ * mapping to an actual value lives here, once, for both appearances. A metric's
+ * meaning and its colour therefore cannot drift apart between two panels.
+ *
+ * Light and dark are handled twice on purpose: prefers-color-scheme is the
+ * default signal, and an explicit data-theme on the root wins over it so the
+ * in-app toggle works in both directions.
+ */
+
+:root {
+	color-scheme: light dark;
+
+	/* System colours — light appearance */
+	--system-blue: oklch(0.596 0.204 258.3);
+	--system-green: oklch(0.746 0.196 145.5);
+	--system-indigo: oklch(0.514 0.199 285.6);
+	--system-orange: oklch(0.762 0.164 62.5);
+	--system-pink: oklch(0.635 0.235 12.5);
+	--system-purple: oklch(0.603 0.212 314.2);
+	--system-red: oklch(0.629 0.229 29.9);
+	--system-teal: oklch(0.699 0.106 213.4);
+	--system-yellow: oklch(0.86 0.166 91.4);
+	--system-mint: oklch(0.735 0.122 182.6);
+	--system-gray: oklch(0.641 0.008 286);
+
+	/* Labels */
+	--label-primary: oklch(0.145 0 0);
+	--label-secondary: oklch(0.44 0.008 286);
+	--label-tertiary: oklch(0.6 0.006 286);
+	--label-quaternary: oklch(0.72 0.004 286);
+
+	/* Backgrounds and fills */
+	--bg-primary: oklch(1 0 0);
+	--bg-secondary: oklch(0.968 0.002 286);
+	--bg-elevated: oklch(1 0 0);
+	--fill-primary: oklch(0.92 0.004 286);
+	--fill-secondary: oklch(0.95 0.003 286);
+	--separator: oklch(0.89 0.004 286);
+
+	--accent: var(--system-blue);
+	--shadow-card: 0 1px 2px oklch(0 0 0 / 0.06), 0 1px 6px oklch(0 0 0 / 0.04);
+
+	/* Semantic mapping. Every chart series and stat resolves through these,
+	   so "bad" is one colour everywhere it appears. */
+	--intent-good: var(--system-green);
+	--intent-warn: var(--system-orange);
+	--intent-bad: var(--system-red);
+	--intent-neutral: var(--label-secondary);
+
+	--radius-card: 12px;
+	--radius-control: 8px;
+
+	--font-ui:
+		-apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', 'Pretendard',
+		'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
+	--font-mono:
+		ui-monospace, 'SF Mono', 'Cascadia Mono', 'Segoe UI Mono', 'JetBrains Mono', Menlo, Consolas,
+		monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--system-blue: oklch(0.635 0.204 256.5);
+		--system-green: oklch(0.779 0.208 146.4);
+		--system-indigo: oklch(0.539 0.22 285.4);
+		--system-orange: oklch(0.782 0.163 65.5);
+		--system-pink: oklch(0.652 0.23 15.5);
+		--system-purple: oklch(0.652 0.226 313.5);
+		--system-red: oklch(0.653 0.221 29.2);
+		--system-teal: oklch(0.771 0.114 213.5);
+		--system-yellow: oklch(0.878 0.175 91.6);
+		--system-mint: oklch(0.783 0.126 182);
+		--system-gray: oklch(0.641 0.008 286);
+
+		--label-primary: oklch(0.98 0 0);
+		--label-secondary: oklch(0.72 0.008 286);
+		--label-tertiary: oklch(0.58 0.006 286);
+		--label-quaternary: oklch(0.45 0.004 286);
+
+		--bg-primary: oklch(0.145 0 0);
+		--bg-secondary: oklch(0.205 0.003 286);
+		--bg-elevated: oklch(0.235 0.003 286);
+		--fill-primary: oklch(0.29 0.004 286);
+		--fill-secondary: oklch(0.25 0.003 286);
+		--separator: oklch(0.32 0.004 286);
+
+		--shadow-card: 0 1px 2px oklch(0 0 0 / 0.4);
+	}
+}
+
+/* The in-app toggle stamps data-theme on the root; it must beat the media
+   query in both directions, which is why each appearance is spelled out. */
+:root[data-theme='light'] {
+	color-scheme: light;
+	--system-blue: oklch(0.596 0.204 258.3);
+	--system-green: oklch(0.746 0.196 145.5);
+	--system-indigo: oklch(0.514 0.199 285.6);
+	--system-orange: oklch(0.762 0.164 62.5);
+	--system-pink: oklch(0.635 0.235 12.5);
+	--system-purple: oklch(0.603 0.212 314.2);
+	--system-red: oklch(0.629 0.229 29.9);
+	--system-teal: oklch(0.699 0.106 213.4);
+	--system-yellow: oklch(0.86 0.166 91.4);
+	--system-mint: oklch(0.735 0.122 182.6);
+
+	--label-primary: oklch(0.145 0 0);
+	--label-secondary: oklch(0.44 0.008 286);
+	--label-tertiary: oklch(0.6 0.006 286);
+	--label-quaternary: oklch(0.72 0.004 286);
+
+	--bg-primary: oklch(1 0 0);
+	--bg-secondary: oklch(0.968 0.002 286);
+	--bg-elevated: oklch(1 0 0);
+	--fill-primary: oklch(0.92 0.004 286);
+	--fill-secondary: oklch(0.95 0.003 286);
+	--separator: oklch(0.89 0.004 286);
+	--shadow-card: 0 1px 2px oklch(0 0 0 / 0.06), 0 1px 6px oklch(0 0 0 / 0.04);
+}
+
+:root[data-theme='dark'] {
+	color-scheme: dark;
+	--system-blue: oklch(0.635 0.204 256.5);
+	--system-green: oklch(0.779 0.208 146.4);
+	--system-indigo: oklch(0.539 0.22 285.4);
+	--system-orange: oklch(0.782 0.163 65.5);
+	--system-pink: oklch(0.652 0.23 15.5);
+	--system-purple: oklch(0.652 0.226 313.5);
+	--system-red: oklch(0.653 0.221 29.2);
+	--system-teal: oklch(0.771 0.114 213.5);
+	--system-yellow: oklch(0.878 0.175 91.6);
+	--system-mint: oklch(0.783 0.126 182);
+
+	--label-primary: oklch(0.98 0 0);
+	--label-secondary: oklch(0.72 0.008 286);
+	--label-tertiary: oklch(0.58 0.006 286);
+	--label-quaternary: oklch(0.45 0.004 286);
+
+	--bg-primary: oklch(0.145 0 0);
+	--bg-secondary: oklch(0.205 0.003 286);
+	--bg-elevated: oklch(0.235 0.003 286);
+	--fill-primary: oklch(0.29 0.004 286);
+	--fill-secondary: oklch(0.25 0.003 286);
+	--separator: oklch(0.32 0.004 286);
+	--shadow-card: 0 1px 2px oklch(0 0 0 / 0.4);
+}

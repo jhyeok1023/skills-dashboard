@@ -1,3 +1,95 @@
 [tools]
 go = "1.26.5"
 node = "24"
+
+[env]
+_.file = { path = ".env", redact = true }
+
+# ---------------------------------------------------------------------------
+# web
+#
+# The SvelteKit build writes straight into internal/web/dist so the Go embed
+# has nothing to copy. See web/vite.config.ts (adapter pages/assets options).
+# yarn is invoked through its vendored release so no corepack shim is needed.
+# ---------------------------------------------------------------------------
+
+[tasks."web:install"]
+description = "Install frontend dependencies"
+dir = "web"
+run = "node .yarn/releases/yarn-4.18.0.cjs install"
+
+[tasks."web:build"]
+description = "Build the SvelteKit SPA into internal/web/dist"
+dir = "web"
+run = "node .yarn/releases/yarn-4.18.0.cjs build"
+# Paths are relative to `dir`, so the build output is one level up.
+sources = ["src/**/*", "package.json", "vite.config.ts"]
+outputs = ["../internal/web/dist/index.html"]
+
+[tasks."web:dev"]
+description = "Vite dev server on :5173, proxying /api to :8080"
+dir = "web"
+run = "node .yarn/releases/yarn-4.18.0.cjs dev"
+
+[tasks."web:check"]
+description = "svelte-check"
+dir = "web"
+run = "node .yarn/releases/yarn-4.18.0.cjs check"
+
+# ---------------------------------------------------------------------------
+# go
+# ---------------------------------------------------------------------------
+
+[tasks."go:run"]
+description = "Run the API server on :8080 without embedding the UI"
+run = "go run ./cmd/skills-dashboard --port 8080"
+
+[tasks."build:windows"]
+description = "Cross-compile the single binary for Windows"
+depends = ["web:build"]
+run = "go build -trimpath -ldflags=-s -o dist/skills-dashboard.exe ./cmd/skills-dashboard"
+env = { GOOS = "windows", GOARCH = "amd64", CGO_ENABLED = "0" }
+
+[tasks."build:linux"]
+description = "Cross-compile the single binary for Linux"
+depends = ["web:build"]
+run = "go build -trimpath -ldflags=-s -o dist/skills-dashboard ./cmd/skills-dashboard"
+env = { GOOS = "linux", GOARCH = "amd64", CGO_ENABLED = "0" }
+
+[tasks.build]
+description = "Build both platform binaries"
+depends = ["build:windows", "build:linux"]
+
+# ---------------------------------------------------------------------------
+# quality
+# ---------------------------------------------------------------------------
+
+[tasks.test]
+description = "Go unit tests + frontend unit tests"
+run = [
+  "go test ./...",
+  "node web/.yarn/releases/yarn-4.18.0.cjs --cwd web test:unit --run",
+]
+
+[tasks."test:go"]
+description = "Go unit tests"
+run = "go test ./..."
+
+[tasks."test:e2e"]
+description = "Playwright layout checks"
+dir = "web"
+run = "node .yarn/releases/yarn-4.18.0.cjs test:e2e"
+
+[tasks.lint]
+description = "go vet + prettier + eslint"
+run = [
+  "go vet ./...",
+  "node web/.yarn/releases/yarn-4.18.0.cjs --cwd web lint",
+]
+
+[tasks.fmt]
+description = "gofmt + prettier"
+run = [
+  "go fmt ./...",
+  "node web/.yarn/releases/yarn-4.18.0.cjs --cwd web format",
+]

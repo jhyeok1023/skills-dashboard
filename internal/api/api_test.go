@@ -1,0 +1,837 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
+	logtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
+	"github.com/aws/aws-sdk-go-v2/service/eks"
+	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
+
+	"github.com/jhyeok1023/skills-dashboard/internal/awsx"
+	"github.com/jhyeok1023/skills-dashboard/internal/config"
+	"github.com/jhyeok1023/skills-dashboard/internal/domain"
+)
+
+var testNow = time.Date(2026, 8, 10, 10, 3, 47, 0, time.UTC)
+
+// stubMetrics answers any GetMetricData with one deterministic series per
+// query, so the same request always produces the same numbers.
+type stubMetrics struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *stubMetrics) GetMetricData(_ context.Context, in *cloudwatch.GetMetricDataInput, _ ...func(*cloudwatch.Options)) (*cloudwatch.GetMetricDataOutput, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+
+	start := aws.ToTime(in.StartTime)
+	end := aws.ToTime(in.EndTime)
+	var out cloudwatch.GetMetricDataOutput
+	for qi, q := range in.MetricDataQueries {
+		id := aws.ToString(q.Id)
+		period := time.Duration(aws.ToInt32(q.Period)) * time.Second
+		if period <= 0 {
+			period = 5 * time.Minute
+		}
+		// Two labelled series per query, as a SEARCH would return.
+		for li, label := range []string{"alpha", "beta"} {
+			var ts []time.Time
+			var vals []float64
+			i := 0
+			for t := start; t.Before(end); t = t.Add(period) {
+				ts = append(ts, t)
+				vals = append(vals, float64((qi+1)*10+li*3+i%7))
+				i++
+			}
+			out.MetricDataResults = append(out.MetricDataResults, cwtypes.MetricDataResult{
+				Id:         aws.String(id),
+				Label:      aws.String(label),
+				Timestamps: ts,
+				Values:     vals,
+			})
+		}
+	}
+	return &out, nil
+}
+
+// stubLogs recognises each query by its text and replays fixed rows.
+type stubLogs struct {
+	mu      sync.Mutex
+	queries map[string]string // queryId -> kind
+	next    int
+	starts  []string
+}
+
+func newStubLogs() *stubLogs { return &stubLogs{queries: map[string]string{}} }
+
+func classify(q string) string {
+	switch {
+	case strings.Contains(q, "latencySamples"):
+		return "traffic"
+	case strings.Contains(q, "not in [200, 201]") && strings.Contains(q, "sort @timestamp desc"):
+		return "badStatusList"
+	case strings.Contains(q, "not in [200, 201]"):
+		return "badStatusSeries"
+	case strings.Contains(q, "as t, level"):
+		return "errorSeries"
+	case strings.Contains(q, "isWarn") && strings.Contains(q, "sort @timestamp desc"):
+		return "errorList"
+	case strings.Contains(q, "as t, action"):
+		return "wafAction"
+	case strings.Contains(q, "httpMethod as method"):
+		return "wafMethod"
+	case strings.Contains(q, "uri as uri, httpRequest.args"):
+		return "wafPath"
+	case strings.Contains(q, "terminatingRuleId as rule") && strings.Contains(q, "sort @timestamp desc"):
+		return "wafBlockedList"
+	case strings.Contains(q, "terminatingRuleId as rule"):
+		return "wafBlocked"
+	case strings.Contains(q, "parse @message"):
+		return "wafHeader"
+	default:
+		return "unknown"
+	}
+}
+
+func (s *stubLogs) StartQuery(_ context.Context, in *cloudwatchlogs.StartQueryInput, _ ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.StartQueryOutput, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.next++
+	id := fmt.Sprintf("q%d", s.next)
+	s.queries[id] = classify(aws.ToString(in.QueryString))
+	s.starts = append(s.starts, aws.ToString(in.QueryString))
+	return &cloudwatchlogs.StartQueryOutput{QueryId: aws.String(id)}, nil
+}
+
+func (s *stubLogs) GetQueryResults(_ context.Context, in *cloudwatchlogs.GetQueryResultsInput, _ ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.GetQueryResultsOutput, error) {
+	s.mu.Lock()
+	kind := s.queries[aws.ToString(in.QueryId)]
+	s.mu.Unlock()
+	return &cloudwatchlogs.GetQueryResultsOutput{
+		Status:     logtypes.QueryStatusComplete,
+		Results:    rowsFor(kind),
+		Statistics: &logtypes.QueryStatistics{BytesScanned: 2048, RecordsMatched: 42},
+	}, nil
+}
+
+func (s *stubLogs) StopQuery(_ context.Context, _ *cloudwatchlogs.StopQueryInput, _ ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.StopQueryOutput, error) {
+	return &cloudwatchlogs.StopQueryOutput{}, nil
+}
+
+func (s *stubLogs) DescribeLogGroups(_ context.Context, _ *cloudwatchlogs.DescribeLogGroupsInput, _ ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.DescribeLogGroupsOutput, error) {
+	return &cloudwatchlogs.DescribeLogGroupsOutput{
+		LogGroups: []logtypes.LogGroup{{LogGroupName: aws.String("/aws/containerinsights/prod/application")}},
+	}, nil
+}
+
+func f(name, value string) logtypes.ResultField {
+	return logtypes.ResultField{Field: aws.String(name), Value: aws.String(value)}
+}
+
+// bucket renders a bin() timestamp inside the test window.
+func bucket(i int) string {
+	w, _ := domain.NewWindow(testNow, domain.Range1h, domain.Period5m)
+	return time.Unix(w.Timestamps()[i], 0).UTC().Format("2006-01-02 15:04:05.000")
+}
+
+func rowsFor(kind string) [][]logtypes.ResultField {
+	switch kind {
+	case "traffic":
+		return [][]logtypes.ResultField{
+			{f("t", bucket(0)), f("app", "api"), f("requests", "100"), f("latencySamples", "90"), f("avg", "12"), f("p50", "10"), f("p90", "40"), f("p99", "120")},
+			{f("t", bucket(1)), f("app", "api"), f("requests", "150"), f("latencySamples", "140"), f("avg", "15"), f("p50", "11"), f("p90", "45"), f("p99", "180")},
+			{f("t", bucket(1)), f("app", "worker"), f("requests", "20"), f("latencySamples", "20"), f("avg", "5"), f("p50", "4"), f("p90", "8"), f("p99", "30")},
+		}
+	case "badStatusSeries":
+		// 1284 non-OK responses in total, far more than the list can carry.
+		return [][]logtypes.ResultField{
+			{f("t", bucket(0)), f("status", "503"), f("path", "/healthcheck"), f("n", "800")},
+			{f("t", bucket(1)), f("status", "404"), f("path", "/v1/user"), f("n", "484")},
+		}
+	case "badStatusList":
+		rows := make([][]logtypes.ResultField, 300)
+		for i := range rows {
+			rows[i] = []logtypes.ResultField{
+				f("@timestamp", "2026-08-10 09:30:00.000"),
+				f("pod", "api-5cbb6d585d-cr4rd"), f("app", "api"),
+				f("method", "GET"), f("path", "/healthcheck"),
+				f("status", "503"), f("latencyMs", "12.5"), f("clientIp", "10.0.3.123"),
+			}
+		}
+		return rows
+	case "errorSeries":
+		return [][]logtypes.ResultField{
+			{f("t", bucket(0)), f("level", "error"), f("n", "412")},
+			{f("t", bucket(1)), f("level", "warn"), f("n", "77")},
+		}
+	case "errorList":
+		rows := make([][]logtypes.ResultField, 300)
+		for i := range rows {
+			rows[i] = []logtypes.ResultField{
+				f("@timestamp", "2026-08-10 09:31:00.000"),
+				f("pod", "user-1"), f("container", "user"),
+				f("log", "WARN: connection pool exhausted"),
+			}
+		}
+		return rows
+	case "wafAction":
+		return [][]logtypes.ResultField{
+			{f("t", bucket(0)), f("action", "ALLOW"), f("n", "900")},
+			{f("t", bucket(0)), f("action", "BLOCK"), f("n", "100")},
+			{f("t", bucket(2)), f("action", "ALLOW"), f("n", "700")},
+		}
+	case "wafMethod":
+		return [][]logtypes.ResultField{
+			{f("method", "GET"), f("n", "1500")},
+			{f("method", "POST"), f("n", "200")},
+		}
+	case "wafPath":
+		return [][]logtypes.ResultField{
+			{f("uri", "/v1/user"), f("args", "email=a@b.c"), f("n", "80")},
+			{f("uri", "/healthcheck"), f("args", ""), f("n", "1200")},
+		}
+	case "wafBlocked":
+		return [][]logtypes.ResultField{
+			{f("rule", "sqli"), f("clientIp", "1.2.3.4"), f("country", "KR"), f("n", "60")},
+			{f("rule", "xss"), f("clientIp", "5.6.7.8"), f("country", "US"), f("n", "40")},
+		}
+	case "wafBlockedList":
+		return [][]logtypes.ResultField{
+			{f("@timestamp", "2026-08-10 09:40:00.000"), f("rule", "sqli"), f("clientIp", "1.2.3.4"), f("country", "KR"), f("method", "GET"), f("uri", "/v1/user"), f("args", "email=a@b.c")},
+		}
+	case "wafHeader":
+		return [][]logtypes.ResultField{
+			{f("value", "Mozilla/5.0"), f("n", "1100")},
+			{f("value", "curl/8"), f("n", "60")},
+		}
+	default:
+		return nil
+	}
+}
+
+// stubEKS supplies the node group scaling limits, the only source for the
+// minimum and maximum node counts.
+type stubEKS struct{}
+
+func (stubEKS) ListClusters(context.Context, *eks.ListClustersInput, ...func(*eks.Options)) (*eks.ListClustersOutput, error) {
+	return &eks.ListClustersOutput{Clusters: []string{"prod"}}, nil
+}
+
+func (stubEKS) ListNodegroups(context.Context, *eks.ListNodegroupsInput, ...func(*eks.Options)) (*eks.ListNodegroupsOutput, error) {
+	return &eks.ListNodegroupsOutput{Nodegroups: []string{"general"}}, nil
+}
+
+func (stubEKS) DescribeNodegroup(context.Context, *eks.DescribeNodegroupInput, ...func(*eks.Options)) (*eks.DescribeNodegroupOutput, error) {
+	return &eks.DescribeNodegroupOutput{Nodegroup: &ekstypes.Nodegroup{
+		ScalingConfig: &ekstypes.NodegroupScalingConfig{
+			MinSize: aws.Int32(2), MaxSize: aws.Int32(9), DesiredSize: aws.Int32(4),
+		},
+	}}, nil
+}
+
+func newTestService(t *testing.T) (*Service, http.Handler) {
+	t.Helper()
+
+	store, err := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := store.Get()
+	cfg.ClusterName = "prod"
+	cfg.Namespace = "default"
+	cfg.LoadBalancer = "app/my-alb/abc"
+	cfg.TargetGroups = []string{"targetgroup/k8s-default-product-d6d507c878/def"}
+	cfg.RDSProxies = []string{"app-proxy"}
+	cfg.WebACLs = []string{"skills-waf"}
+	cfg.WAFLogGroup = "aws-waf-logs-demo"
+	if err := store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := newStubLogs()
+	metrics := &stubMetrics{}
+	svc := &Service{
+		Store: store,
+		Now:   func() time.Time { return testNow },
+		Cache: &awsx.Cache{TTL: time.Minute},
+		Clients: &awsx.Clients{
+			Region: "ap-northeast-2", WAFRegion: "us-east-1",
+			CW: metrics, CWGlobal: metrics, Logs: logs, LogsGlobal: logs, EKS: stubEKS{},
+		},
+		Insights: &awsx.InsightsRunner{API: logs, Concurrency: 6, PollInterval: time.Millisecond},
+		Metrics:  &awsx.MetricFetcher{},
+	}
+	return svc, svc.Handler()
+}
+
+func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	return rec
+}
+
+func decodePayload(t *testing.T, rec *httptest.ResponseRecorder) domain.Payload {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var p domain.Payload
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+		t.Fatalf("decode: %v\n%s", err, rec.Body.String())
+	}
+	return p
+}
+
+func findPanel(t *testing.T, p domain.Payload, id string) *domain.Panel {
+	t.Helper()
+	for _, panel := range p.Panels {
+		if panel.ID == id {
+			return panel
+		}
+	}
+	t.Fatalf("payload has no panel %q", id)
+	return nil
+}
+
+// This is the regression line for the defect the rewrite exists to fix: a
+// number shown on an overview disagreeing with the same number on its detail
+// view. Both views are served by the same builder, and here we prove that a
+// panel fetched alone is byte-for-byte the panel inside a page.
+func TestPanelIsIdenticalWhetherFetchedAloneOrInsideAPage(t *testing.T) {
+	_, h := newTestService(t)
+
+	cases := []struct{ panel, page string }{
+		{"pod-latency", "overview"},
+		{"pod-latency", "pod-logs"},
+		{"pod-status-codes", "overview"},
+		{"pod-status-codes", "pod-logs"},
+		{"targetgroup", "overview"},
+		{"counts", "overview"},
+		{"counts", "kubernetes"},
+		{"pod-status", "overview"},
+		{"pod-status", "kubernetes"},
+		{"waf-traffic", "overview"},
+		{"waf-traffic", "waf"},
+		{"pod-errors", "pod-logs"},
+		{"rds-proxy", "database"},
+	}
+
+	for _, tc := range cases {
+		alone := findPanel(t, decodePayload(t, get(t, h, "/api/panel/"+tc.panel+"?range=1h&period=5m")), tc.panel)
+		inPage := findPanel(t, decodePayload(t, get(t, h, "/api/page/"+tc.page+"?range=1h&period=5m")), tc.panel)
+
+		a, err := json.Marshal(alone)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := json.Marshal(inPage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(a) != string(b) {
+			t.Errorf("panel %q differs between /api/panel and /api/page/%s\nalone:  %s\nin page: %s",
+				tc.panel, tc.page, a, b)
+		}
+	}
+}
+
+// Every panel in a response is plotted against one axis, so two panels cannot
+// describe different spans.
+func TestPageCarriesOneWindowForEveryPanel(t *testing.T) {
+	_, h := newTestService(t)
+	for _, page := range []string{"overview", "pod-logs", "waf", "kubernetes", "database", "targetgroup"} {
+		p := decodePayload(t, get(t, h, "/api/page/"+page+"?range=4h&period=5m"))
+		if p.Window.Period != 300 {
+			t.Errorf("page %s: period = %d, want 300", page, p.Window.Period)
+		}
+		if got := len(p.Window.Timestamps); got != 48 {
+			t.Errorf("page %s: %d timestamps, want 48", page, got)
+		}
+		if len(p.Panels) == 0 {
+			t.Errorf("page %s rendered no panels", page)
+		}
+		for _, panel := range p.Panels {
+			for _, s := range panel.Series {
+				if len(s.Values) != len(p.Window.Timestamps) {
+					t.Errorf("page %s panel %s series %q has %d values against a %d-bucket axis",
+						page, panel.ID, s.Label, len(s.Values), len(p.Window.Timestamps))
+				}
+			}
+		}
+	}
+}
+
+// The list is capped at 300; the true count is 1284. Reporting the list's
+// length as the total is the bug this guards.
+func TestTableTotalIsCountedIndependentlyOfTheRowsShown(t *testing.T) {
+	_, h := newTestService(t)
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-status-codes?range=1h&period=5m")), "pod-status-codes")
+
+	if panel.Table == nil {
+		t.Fatal("no table")
+	}
+	if len(panel.Table.Rows) != 300 {
+		t.Fatalf("got %d rows, want the capped 300", len(panel.Table.Rows))
+	}
+	if panel.Table.Total != 1284 {
+		t.Errorf("Total = %d, want the aggregate's 1284", panel.Table.Total)
+	}
+	if !panel.Table.Truncated {
+		t.Error("Truncated = false even though 1284 > 300")
+	}
+
+	// The headline stat must agree with the aggregate, not with the list.
+	var stat *domain.Stat
+	for i := range panel.Stats {
+		if panel.Stats[i].Key == "pod.badStatus.total" {
+			stat = &panel.Stats[i]
+		}
+	}
+	if stat == nil {
+		t.Fatal("no total stat")
+	}
+	if stat.Value == nil || *stat.Value != 1284 {
+		t.Errorf("headline = %v, want 1284", stat.Value)
+	}
+	if stat.Basis == "" {
+		t.Error("the stat does not say what population it counted")
+	}
+}
+
+func TestErrorPanelTotalIsNotTheCappedListLength(t *testing.T) {
+	_, h := newTestService(t)
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-errors?range=1h&period=5m")), "pod-errors")
+
+	if len(panel.Table.Rows) != 300 {
+		t.Fatalf("got %d rows", len(panel.Table.Rows))
+	}
+	// 412 errors + 77 warnings.
+	if panel.Table.Total != 489 {
+		t.Errorf("Total = %d, want 489", panel.Table.Total)
+	}
+	stats := map[string]float64{}
+	for _, s := range panel.Stats {
+		if s.Value != nil {
+			stats[s.Key] = *s.Value
+		}
+	}
+	if stats["pod.error.total"] != 412 {
+		t.Errorf("ERROR total = %v, want 412", stats["pod.error.total"])
+	}
+	if stats["pod.warn.total"] != 77 {
+		t.Errorf("WARN total = %v, want 77", stats["pod.warn.total"])
+	}
+}
+
+// Two counts of "requests" existed in the reference implementation under one
+// label. Here they are separate stats, each naming its population.
+func TestLatencyPanelSeparatesItsTwoRequestPopulations(t *testing.T) {
+	_, h := newTestService(t)
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-latency?range=1h&period=5m")), "pod-latency")
+
+	byKey := map[string]domain.Stat{}
+	for _, s := range panel.Stats {
+		byKey[s.Key] = s
+	}
+
+	requests, ok := byKey["pod.requests.total"]
+	if !ok {
+		t.Fatal("no request total")
+	}
+	samples, ok := byKey["pod.latencySamples.total"]
+	if !ok {
+		t.Fatal("no latency sample total")
+	}
+	if requests.Value == nil || *requests.Value != 270 {
+		t.Errorf("requests = %v, want 270", requests.Value)
+	}
+	if samples.Value == nil || *samples.Value != 250 {
+		t.Errorf("latency samples = %v, want 250", samples.Value)
+	}
+	if requests.Label == samples.Label {
+		t.Error("two different populations share one label, which is exactly the confusion being fixed")
+	}
+	if requests.Basis == "" || samples.Basis == "" || requests.Basis == samples.Basis {
+		t.Errorf("the two stats do not distinguish their populations: %q vs %q", requests.Basis, samples.Basis)
+	}
+
+	if v := byKey["pod.p99.max"].Value; v == nil || *v != 180 {
+		t.Errorf("max p99 = %v, want 180", v)
+	}
+}
+
+func TestRangeBeyondFourHoursIsRejected(t *testing.T) {
+	_, h := newTestService(t)
+	for _, q := range []string{"?range=8h", "?range=24h", "?range=6h&period=5m"} {
+		rec := get(t, h, "/api/page/overview"+q)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", q, rec.Code)
+		}
+	}
+	for _, q := range []string{"?range=15m&period=10m", "?range=1h&period=1h"} {
+		rec := get(t, h, "/api/page/overview"+q)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400 for an unusable bucket count", q, rec.Code)
+		}
+	}
+}
+
+func TestMetaNeverOffersACombinationTheServerRejects(t *testing.T) {
+	_, h := newTestService(t)
+	rec := get(t, h, "/api/meta")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	var meta metaResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.MaxRangeSeconds != 4*60*60 {
+		t.Errorf("MaxRangeSeconds = %d, want 14400", meta.MaxRangeSeconds)
+	}
+	if len(meta.Ranges) == 0 {
+		t.Fatal("no ranges offered")
+	}
+	for _, r := range meta.Ranges {
+		if r.Seconds > meta.MaxRangeSeconds {
+			t.Errorf("range %s exceeds the advertised maximum", r.Range)
+		}
+		for _, p := range r.Periods {
+			rec := get(t, h, "/api/page/overview?range="+r.Range+"&period="+p)
+			if rec.Code != http.StatusOK {
+				t.Errorf("meta offers %s/%s but the server answers %d", r.Range, p, rec.Code)
+			}
+		}
+	}
+}
+
+func TestUnknownPanelAndPageAreRejected(t *testing.T) {
+	_, h := newTestService(t)
+	if rec := get(t, h, "/api/panel/nope"); rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown panel: status %d", rec.Code)
+	}
+	if rec := get(t, h, "/api/page/nope"); rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown page: status %d", rec.Code)
+	}
+}
+
+func TestMissingCredentialsExplainThemselves(t *testing.T) {
+	svc, _ := newTestService(t)
+	svc.CredentialError = fmt.Errorf("missing AWS_ACCESS_KEY_ID")
+	h := svc.Handler()
+
+	rec := get(t, h, "/api/page/overview")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, want 503", rec.Code)
+	}
+	var resp errorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(resp.Hint, ".env") {
+		t.Errorf("hint does not say where credentials go: %q", resp.Hint)
+	}
+
+	// Health still answers, so the UI can tell the difference between a
+	// misconfigured dashboard and a dead one.
+	if rec := get(t, h, "/api/health"); rec.Code != http.StatusOK {
+		t.Errorf("health: status %d", rec.Code)
+	}
+}
+
+// The cost of a refresh is reported rather than left to a bill.
+func TestInsightsScanCostIsReported(t *testing.T) {
+	_, h := newTestService(t)
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-latency?range=1h&period=5m")), "pod-latency")
+	for _, s := range panel.Stats {
+		if s.Key == "insights.bytesScanned" {
+			if s.Value == nil || *s.Value <= 0 {
+				t.Errorf("bytesScanned = %v", s.Value)
+			}
+			return
+		}
+	}
+	t.Error("no scan-cost stat")
+}
+
+// A panel that fails must not blank the ones beside it.
+func TestAFailingPanelDoesNotSinkThePage(t *testing.T) {
+	svc, _ := newTestService(t)
+	cfg := svc.Store.Get()
+	cfg.WAFLogGroup = "" // the WAF panels now have nothing to query
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+	h := svc.Handler()
+
+	p := decodePayload(t, get(t, h, "/api/page/overview?range=1h&period=5m"))
+	waf := findPanel(t, p, "waf-traffic")
+	if len(waf.Warnings) == 0 {
+		t.Error("the WAF panel reported no reason for being empty")
+	}
+	latency := findPanel(t, p, "pod-latency")
+	if len(latency.Series) == 0 {
+		t.Error("an unrelated panel lost its data because a neighbour failed")
+	}
+}
+
+func TestUnselectedResourcesProduceAnExplanationNotAnError(t *testing.T) {
+	store, err := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := newStubLogs()
+	metrics := &stubMetrics{}
+	svc := &Service{
+		Store: store,
+		Now:   func() time.Time { return testNow },
+		Cache: &awsx.Cache{TTL: time.Minute},
+		Clients: &awsx.Clients{
+			Region: "ap-northeast-2", WAFRegion: "us-east-1",
+			CW: metrics, CWGlobal: metrics, Logs: logs, LogsGlobal: logs, EKS: stubEKS{},
+		},
+		Insights: &awsx.InsightsRunner{API: logs, PollInterval: time.Millisecond},
+		Metrics:  &awsx.MetricFetcher{},
+	}
+	h := svc.Handler()
+
+	for _, id := range []string{"targetgroup", "rds-proxy", "waf-metrics", "pod-resource", "counts"} {
+		p := decodePayload(t, get(t, h, "/api/panel/"+id+"?range=1h&period=5m"))
+		panel := findPanel(t, p, id)
+		if len(panel.Warnings) == 0 {
+			t.Errorf("panel %q is empty with no explanation", id)
+		}
+	}
+}
+
+func TestConfigRoundTripThroughTheAPI(t *testing.T) {
+	svc, h := newTestService(t)
+
+	rec := get(t, h, "/api/config")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	var cfg config.Config
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Namespace = "payments"
+
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(string(body)))
+	put := httptest.NewRecorder()
+	h.ServeHTTP(put, req)
+	if put.Code != http.StatusOK {
+		t.Fatalf("PUT status %d: %s", put.Code, put.Body.String())
+	}
+	if got := svc.Store.Get().Namespace; got != "payments" {
+		t.Errorf("namespace = %q after save", got)
+	}
+}
+
+func TestConfigRejectsAnUncompilablePattern(t *testing.T) {
+	_, h := newTestService(t)
+	body := `{"logFormat":{"timeField":"time","messageField":"log","levelPattern":"(unclosed","latencyUnit":"ms"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status %d, want 400", rec.Code)
+	}
+}
+
+// The log format is still being settled, so the settings page needs to check a
+// pattern against a real line before saving it.
+func TestLogFormatPreview(t *testing.T) {
+	_, h := newTestService(t)
+	sample := `{"time":"2026-08-09T02:57:08.636329927Z","stream":"stdout","log":"{\"app\":\"stress\",\"latency_ms\":12.5,\"method\":\"GET\",\"path\":\"/healthcheck\",\"status\":503}","log_processed":{"app":"stress","client_ip":"10.0.3.123","latency_ms":12.5,"method":"GET","path":"/healthcheck","status":503},"kubernetes":{"pod_name":"stress-1","namespace_name":"default","container_name":"stress"}}`
+
+	body, err := json.Marshal(map[string]any{"sample": sample})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/logfmt/preview", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp logFormatPreviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Matched {
+		t.Error("a well-formed access line was not recognised")
+	}
+	if resp.Parsed.Status != 503 || resp.Parsed.Path != "/healthcheck" {
+		t.Errorf("parsed = %+v", resp.Parsed)
+	}
+	if !resp.BadStatus {
+		t.Error("503 was not flagged as a bad status")
+	}
+	if resp.Parsed.ClientIP != "10.0.3.123" {
+		t.Errorf("clientIp = %q", resp.Parsed.ClientIP)
+	}
+}
+
+func TestLogFormatPreviewExplainsANonMatch(t *testing.T) {
+	_, h := newTestService(t)
+	body := `{"sample":"just some text with no structure"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/logfmt/preview", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp logFormatPreviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Matched {
+		t.Error("an unstructured line was reported as matched")
+	}
+	if resp.Suggestion == "" {
+		t.Error("no suggestion offered for a line that did not match")
+	}
+}
+
+func TestDiscovery(t *testing.T) {
+	_, h := newTestService(t)
+	rec := get(t, h, "/api/discovery/loggroups?prefix=/aws/containerinsights/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp discoveryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Resources) != 1 {
+		t.Fatalf("got %d resources", len(resp.Resources))
+	}
+	if resp.Resources[0].ID != "/aws/containerinsights/prod/application" {
+		t.Errorf("resource = %+v", resp.Resources[0])
+	}
+
+	if rec := get(t, h, "/api/discovery/nonsense"); rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown kind: status %d", rec.Code)
+	}
+}
+
+// Responses must not be cached by the browser, or a range change would keep
+// showing the previous window.
+func TestResponsesAreNotBrowserCacheable(t *testing.T) {
+	_, h := newTestService(t)
+	for _, path := range []string{"/api/page/overview", "/api/meta", "/api/config"} {
+		rec := get(t, h, path)
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s: Cache-Control = %q, want no-store", path, got)
+		}
+	}
+}
+
+// Identical requests must not re-issue AWS calls within the cache window.
+func TestRepeatedRequestsAreServedFromCache(t *testing.T) {
+	svc, h := newTestService(t)
+	metrics := svc.Clients.CW.(*stubMetrics)
+
+	for i := 0; i < 5; i++ {
+		if rec := get(t, h, "/api/panel/counts?range=1h&period=5m"); rec.Code != http.StatusOK {
+			t.Fatalf("status %d", rec.Code)
+		}
+	}
+	metrics.mu.Lock()
+	calls := metrics.calls
+	metrics.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("GetMetricData ran %d times for five identical requests, want 1", calls)
+	}
+}
+
+// A panic is a bug, but it must cost one response rather than the process.
+func TestAPanicIsContainedToOneResponse(t *testing.T) {
+	svc, _ := newTestService(t)
+	h := svc.recoverPanics(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/page/overview", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d, want 500", rec.Code)
+	}
+	var resp errorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("a panic did not produce JSON: %v (%s)", err, rec.Body.String())
+	}
+	if !strings.Contains(resp.Detail, "/api/page/overview") {
+		t.Errorf("detail does not say what failed: %q", resp.Detail)
+	}
+	// The next request still works.
+	if rec := get(t, svc.Handler(), "/api/health"); rec.Code != http.StatusOK {
+		t.Errorf("health after a panic: status %d", rec.Code)
+	}
+}
+
+// Node bounds come from the node group scaling configuration, and are read per
+// request so a rescale shows up immediately.
+func TestNodeCountReportsMinimumAndMaximum(t *testing.T) {
+	_, h := newTestService(t)
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/counts?range=1h&period=5m")), "counts")
+
+	stats := map[string]domain.Stat{}
+	for _, s := range panel.Stats {
+		stats[s.Key] = s
+	}
+	for _, key := range []string{"pods.current", "pods.min", "pods.max", "nodes.current", "nodes.min", "nodes.max"} {
+		if _, ok := stats[key]; !ok {
+			t.Errorf("counts panel has no %q stat", key)
+		}
+	}
+	if v := stats["nodes.min"].Value; v == nil || *v != 2 {
+		t.Errorf("nodes.min = %v, want 2", v)
+	}
+	if v := stats["nodes.max"].Value; v == nil || *v != 9 {
+		t.Errorf("nodes.max = %v, want 9", v)
+	}
+	// Pod bounds have no AWS-side source, so they must say they are observed
+	// rather than imply they are an autoscaler's configured limits.
+	if b := stats["pods.min"].Basis; !strings.Contains(b, "관측") {
+		t.Errorf("pods.min basis = %q, want it to state that the value is observed", b)
+	}
+}
+
+// A different window must not be served from another window's cache entry.
+func TestCacheIsKeyedByWindow(t *testing.T) {
+	svc, h := newTestService(t)
+	metrics := svc.Clients.CW.(*stubMetrics)
+
+	get(t, h, "/api/panel/counts?range=1h&period=5m")
+	get(t, h, "/api/panel/counts?range=4h&period=5m")
+
+	metrics.mu.Lock()
+	calls := metrics.calls
+	metrics.mu.Unlock()
+	if calls != 2 {
+		t.Errorf("GetMetricData ran %d times for two different windows, want 2", calls)
+	}
+}

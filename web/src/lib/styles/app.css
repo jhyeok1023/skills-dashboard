@@ -1,0 +1,302 @@
+@import './tokens.css';
+
+/*
+ * The rule that shapes this stylesheet: a value must never be clipped.
+ *
+ * A truncated pod name or ARN is worse than a wrapped one — the operator cannot
+ * tell what they are looking at, and cannot copy it either. So nothing that
+ * carries data gets `text-overflow: ellipsis` or `white-space: nowrap`; long
+ * values wrap, and wide tables scroll inside their own container rather than
+ * pushing the page sideways. The Playwright suite asserts this by comparing
+ * scrollWidth against clientWidth on every element marked data-value.
+ */
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html {
+	-webkit-text-size-adjust: 100%;
+}
+
+body {
+	margin: 0;
+	font-family: var(--font-ui);
+	font-size: 14px;
+	line-height: 1.55;
+	color: var(--label-primary);
+	background: var(--bg-secondary);
+	/* The page itself never scrolls sideways; wide content scrolls inside its
+	   own container. */
+	overflow-x: hidden;
+}
+
+h1,
+h2,
+h3,
+h4 {
+	margin: 0;
+	font-weight: 600;
+	line-height: 1.3;
+	letter-spacing: -0.01em;
+}
+
+h1 {
+	font-size: 22px;
+}
+h2 {
+	font-size: 17px;
+}
+h3 {
+	font-size: 15px;
+}
+
+p {
+	margin: 0;
+}
+
+a {
+	color: var(--accent);
+	text-decoration: none;
+}
+a:hover {
+	text-decoration: underline;
+}
+
+button {
+	font: inherit;
+	color: inherit;
+	cursor: pointer;
+}
+
+:where(button, a, input, select, [tabindex]):focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+	border-radius: 4px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Never clip a value
+ * ------------------------------------------------------------------------- */
+
+[data-value] {
+	overflow-wrap: anywhere;
+	word-break: normal;
+	white-space: normal;
+	/* Belt and braces: even if a utility class sets these, a value wins. */
+	text-overflow: clip;
+	overflow: visible;
+}
+
+.mono {
+	font-family: var(--font-mono);
+	font-size: 12.5px;
+}
+
+.num {
+	font-variant-numeric: tabular-nums;
+	font-feature-settings: 'tnum';
+}
+
+/* Flex and grid children default to min-width:auto, which lets a long value
+   force its parent wider than the viewport. Setting it to 0 lets the value
+   wrap inside the column instead — wrapping, not clipping. */
+.stack > *,
+.row > * {
+	min-width: 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Layout primitives
+ * ------------------------------------------------------------------------- */
+
+.stack {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+}
+
+.row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+}
+
+.grid {
+	display: grid;
+	gap: 16px;
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 30rem), 1fr));
+	/* Table panels span the full width, which would otherwise leave a hole
+	   beside the panel before them. Dense packing pulls the next half-width
+	   panel up into it. */
+	grid-auto-flow: dense;
+}
+
+.card {
+	background: var(--bg-elevated);
+	border: 1px solid var(--separator);
+	border-radius: var(--radius-card);
+	box-shadow: var(--shadow-card);
+	padding: 16px;
+}
+
+.muted {
+	color: var(--label-secondary);
+}
+
+.tiny {
+	font-size: 12px;
+	line-height: 1.45;
+}
+
+/* ---------------------------------------------------------------------------
+ * Tables
+ *
+ * `table-layout: auto` lets columns size to their content, and the wrapper
+ * scrolls horizontally so a wide table never clips a cell nor widens the page.
+ * ------------------------------------------------------------------------- */
+
+.table-scroll {
+	overflow-x: auto;
+	overscroll-behavior-x: contain;
+	border: 1px solid var(--separator);
+	border-radius: var(--radius-control);
+	background: var(--bg-elevated);
+}
+
+table {
+	width: 100%;
+	border-collapse: collapse;
+	table-layout: auto;
+}
+
+th,
+td {
+	padding: 7px 10px;
+	text-align: left;
+	vertical-align: top;
+	border-bottom: 1px solid var(--separator);
+	/* No nowrap: a long path wraps within its column. */
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+
+th {
+	position: sticky;
+	top: 0;
+	z-index: 1;
+	background: var(--bg-secondary);
+	font-weight: 600;
+	font-size: 12px;
+	color: var(--label-secondary);
+	letter-spacing: 0.01em;
+}
+
+tbody tr:last-child td {
+	border-bottom: none;
+}
+
+tbody tr:hover {
+	background: var(--fill-secondary);
+}
+
+td.numeric,
+th.numeric {
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+}
+
+/* A number must never break between its digits — "15,00 / 0" is unreadable.
+   Numbers contain no spaces, so permitting breaks only at spaces means they
+   never break; if a column still cannot fit, the wrapper scrolls. */
+td.numeric,
+td.numeric [data-value] {
+	overflow-wrap: normal;
+	word-break: keep-all;
+}
+
+/* ---------------------------------------------------------------------------
+ * Controls
+ * ------------------------------------------------------------------------- */
+
+.control {
+	appearance: none;
+	background: var(--bg-elevated);
+	border: 1px solid var(--separator);
+	border-radius: var(--radius-control);
+	color: var(--label-primary);
+	padding: 5px 10px;
+	font-size: 13px;
+}
+
+.segmented {
+	display: inline-flex;
+	flex-wrap: wrap;
+	gap: 2px;
+	padding: 2px;
+	background: var(--fill-secondary);
+	border-radius: var(--radius-control);
+}
+
+.segmented button {
+	border: none;
+	background: transparent;
+	border-radius: 6px;
+	padding: 4px 10px;
+	font-size: 13px;
+	color: var(--label-secondary);
+}
+
+.segmented button[aria-pressed='true'] {
+	background: var(--bg-elevated);
+	color: var(--label-primary);
+	box-shadow: var(--shadow-card);
+	font-weight: 600;
+}
+
+.badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 1px 7px;
+	border-radius: 999px;
+	font-size: 11.5px;
+	font-weight: 600;
+	background: var(--fill-secondary);
+	color: var(--label-secondary);
+	/* A badge holding a count must not clip it either. */
+	white-space: normal;
+}
+
+.badge[data-intent='good'] {
+	color: var(--intent-good);
+}
+.badge[data-intent='warn'] {
+	color: var(--intent-warn);
+}
+.badge[data-intent='bad'] {
+	color: var(--intent-bad);
+}
+
+.warning {
+	display: flex;
+	gap: 8px;
+	padding: 8px 10px;
+	border-radius: var(--radius-control);
+	background: color-mix(in oklch, var(--system-orange) 12%, var(--bg-elevated));
+	color: var(--label-primary);
+	font-size: 12.5px;
+	overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		transition-duration: 0.01ms !important;
+	}
+}
