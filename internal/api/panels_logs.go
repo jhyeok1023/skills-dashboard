@@ -111,19 +111,43 @@ func (s *Service) runLogQueries(rc requestCtx, src logSource, name string, qs []
 		results map[string]awsx.QueryResult
 		errs    map[string]error
 	}
-	got, err := awsx.Cached(rc.ctx, s.Cache, b.String(), func(ctx context.Context) (bundle, error) {
+	// Cache.Do is used directly rather than the typed Cached wrapper, because
+	// the wrapper drops the value when the loader reports an error and the
+	// value is exactly what carries the per-query detail.
+	got, err := s.Cache.Do(rc.ctx, b.String(), func(ctx context.Context) (any, error) {
 		res, errs := src.runner.RunAll(ctx, src.group, rc.w, qs)
+		// A wave in which nothing at all came back is reported as a failure so
+		// the cache files it under its short error TTL. Returning nil here — as
+		// this used to, unconditionally — recorded a total wipeout as a
+		// perfectly good result, so an expired credential or a throttled
+		// account stayed on screen for the full TTL after it had cleared.
+		//
+		// A partial failure is still a success: the queries that answered are
+		// worth keeping, and the panel already reports the rest as warnings.
+		if len(qs) > 0 && len(errs) == len(qs) {
+			return bundle{res, errs}, errAllQueriesFailed
+		}
 		return bundle{res, errs}, nil
 	})
-	if err != nil {
-		errs := map[string]error{}
-		for _, q := range qs {
-			errs[q.ID] = err
-		}
-		return nil, errs
+	// The error is deliberately not inspected when a bundle came back. It is
+	// this function's own signal to the cache, and the caller is better served
+	// by the individual query errors it wraps.
+	if got, ok := got.(bundle); ok {
+		return got.results, got.errs
 	}
-	return got.results, got.errs
+	// No value at all means the lookup itself failed — a cancelled request,
+	// typically — so there is nothing per-query to report.
+	errs := map[string]error{}
+	for _, q := range qs {
+		errs[q.ID] = err
+	}
+	return nil, errs
 }
+
+// errAllQueriesFailed marks a bundle in which no query survived, so awsx.Cache
+// expires it under ErrorTTL instead of remembering the wipeout for a full TTL.
+// It never reaches a panel: runLogQueries hands back the per-query errors.
+var errAllQueriesFailed = errors.New("every log query failed")
 
 // excludedPaths renders the probe-exclusion clause appended to every pod-log
 // stat's basis.

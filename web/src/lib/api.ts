@@ -27,7 +27,18 @@ export class ApiFailure extends Error {
 	}
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * `timeoutMs` is only ever reported, never enforced — the caller supplies its
+ * own signal. It is threaded through so the message names the bound that
+ * actually elapsed: a page waits far longer than a discovery, and telling the
+ * operator it gave up after 35 seconds when it waited 95 sends them looking for
+ * the wrong thing.
+ */
+async function request<T>(
+	path: string,
+	init?: RequestInit,
+	timeoutMs = REQUEST_TIMEOUT_MS
+): Promise<T> {
 	let res: Response;
 	try {
 		res = await fetch(path, {
@@ -52,7 +63,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 		if (e instanceof DOMException && e.name === 'TimeoutError') {
 			throw new ApiFailure(
 				0,
-				`서버가 ${Math.round(REQUEST_TIMEOUT_MS / 1000)}초 안에 응답하지 않았습니다.`,
+				`서버가 ${Math.round(timeoutMs / 1000)}초 안에 응답하지 않았습니다.`,
 				'대시보드를 실행한 터미널의 로그를 확인하세요.'
 			);
 		}
@@ -90,6 +101,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
  */
 const REQUEST_TIMEOUT_MS = 35_000;
 
+/**
+ * PAGE_TIMEOUT_MS bounds a page or panel fetch, for the same reason and with
+ * the same ordering: it sits just past the server's own 90s page budget
+ * (api.pageBudget), so a page that runs long still gets to answer with the
+ * warnings it built rather than being cut off by the browser.
+ *
+ * Without it there was no bound at all. If the server never answered — a
+ * WriteTimeout closing the connection, a process killed mid-request — the
+ * skeleton pulsed indefinitely with nothing on screen to say why.
+ */
+const PAGE_TIMEOUT_MS = 95_000;
+
+/**
+ * Combines the caller's cancellation with the page timeout. PageView aborts the
+ * in-flight request whenever the selection changes, and that signal has to
+ * survive: it is how an abandoned request is told apart from a failed one.
+ */
+function pageSignal(signal?: AbortSignal): AbortSignal {
+	const timeout = AbortSignal.timeout(PAGE_TIMEOUT_MS);
+	return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
 /** Builds the query string shared by every data endpoint. */
 function windowQuery(range: string, period: string): string {
 	const q = new URLSearchParams();
@@ -105,10 +138,18 @@ export const api = {
 	health: () => request<{ ok: boolean; credentials: boolean }>('/api/health'),
 
 	page: (id: string, range: string, period: string, signal?: AbortSignal) =>
-		request<Payload>(`/api/page/${id}${windowQuery(range, period)}`, { signal }),
+		request<Payload>(
+			`/api/page/${id}${windowQuery(range, period)}`,
+			{ signal: pageSignal(signal) },
+			PAGE_TIMEOUT_MS
+		),
 
 	panel: (id: string, range: string, period: string, signal?: AbortSignal) =>
-		request<Payload>(`/api/panel/${id}${windowQuery(range, period)}`, { signal }),
+		request<Payload>(
+			`/api/panel/${id}${windowQuery(range, period)}`,
+			{ signal: pageSignal(signal) },
+			PAGE_TIMEOUT_MS
+		),
 
 	config: () => request<Config>('/api/config'),
 

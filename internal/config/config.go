@@ -87,11 +87,28 @@ type Limits struct {
 // DefaultLimits are tuned for a single operator watching one cluster.
 func DefaultLimits() Limits {
 	return Limits{
-		LogRows:             300,
-		TopN:                20,
-		InsightsConcurrency: 6,
+		LogRows: 300,
+		TopN:    20,
+		// The WAF page issues seven Insights queries, and since panels are built
+		// concurrently (api.handlePage) they now arrive as one wave rather than
+		// three. At six, one query waited out a full query's latency before it
+		// could start. Two runners exist when the WAF region differs from the
+		// working region (cmd/skills-dashboard/main.go), each with its own
+		// semaphore, so this is sixteen in the worst case against CloudWatch's
+		// thirty — still comfortable.
+		InsightsConcurrency: 8,
 		QueryTimeoutSeconds: 45,
-		CacheTTLSeconds:     30,
+		// One period. The log-query cache key pins the window bounds
+		// (api.runLogQueries) and NewWindow floors End to the period, so a key
+		// is reachable for exactly one period and then never again. At thirty
+		// seconds against the default 1m period, the back half of every minute
+		// was a guaranteed miss on a key whose answer was already in memory.
+		//
+		// Not raised further on purpose. The window is fixed but its contents
+		// are not: CloudWatch delivers records late, so the same query over the
+		// same window can return more rows a minute later. Living exactly as
+		// long as the key is the most this can claim.
+		CacheTTLSeconds: 60,
 	}
 }
 

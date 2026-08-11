@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"github.com/jhyeok1023/skills-dashboard/internal/awsx"
@@ -353,42 +354,109 @@ func (s *Service) handlePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Panels are built one after another and each one may sit on a full wave of
-	// Logs Insights queries, so a slow page can outlast the server's own
-	// WriteTimeout — at which point Go closes the connection mid-response and
-	// the browser reports a transport failure, blanking the whole page. This
-	// deadline lands first, and lands *inside* a handler: the queries still
-	// running are cancelled, noteQueryErrors turns them into per-panel
-	// warnings, and the panels that did finish are still rendered. A page that
-	// names its slow query beats a page that says nothing at all.
+	// A page sits on a wave of Logs Insights queries and can outlast the
+	// server's own WriteTimeout — at which point Go closes the connection
+	// mid-response and the browser reports a transport failure, blanking the
+	// whole page. This deadline lands first, and lands *inside* a handler: the
+	// queries still running are cancelled, noteQueryErrors turns them into
+	// per-panel warnings, and the panels that did finish are still rendered. A
+	// page that names its slow query beats a page that says nothing at all.
+	//
+	// The budget now covers one wave rather than one per panel, so it bounds
+	// the slowest panel instead of their sum.
 	ctx, cancel := context.WithTimeout(r.Context(), pageBudget)
 	defer cancel()
 
 	rc := requestCtx{ctx: ctx, w: win, cfg: s.Store.Get()}
-	builders := s.panelBuilders()
 	payload := domain.NewPayload(win)
 
-	// Panels are built sequentially against a shared cache; the expensive work
-	// underneath is already concurrent, and a failing panel must not blank the
-	// ones beside it.
-	for _, pid := range ids {
+	// Payload.Add is a bare append, so it stays on this goroutine.
+	for _, panel := range s.buildPanels(rc, id, ids, s.panelBuilders()) {
+		if panel != nil {
+			payload.Add(panel)
+		}
+	}
+	s.finish(w, payload)
+}
+
+// buildPanels builds every panel of a page at once and returns them in the
+// order they were asked for.
+//
+// They used to be built one after another, and since each one sits on its own
+// wave of Logs Insights queries — only the queries *within* a panel overlapped
+// — a four-panel page cost the sum of four waves when it need only cost the
+// longest of them. The WAF page was the worst of it: its metrics panel is a
+// single GetMetricData that answers in well under a second, and it waited out
+// three Insights waves before anyone saw it.
+//
+// Nothing the builders touch is shared mutable state. requestCtx carries a
+// context, a window and a config snapshot, all read-only and passed by value;
+// awsx.Cache is mutex-guarded and single-flight, so two panels asking the same
+// question collapse into one call rather than racing; InsightsRunner keeps its
+// own semaphore, so this queues against the concurrency limit instead of
+// overrunning it; and noteQueryCost/noteQueryErrors only ever append to the
+// panel handed to them.
+//
+// Results land in a fixed slot rather than being appended as they finish. The
+// frontend renders payload.panels in array order and lays out the wide ones
+// around it, so the response has to keep the order `pages` declares no matter
+// which panel won the race.
+func (s *Service) buildPanels(rc requestCtx, page string, ids []string, builders map[string]panelBuilder) []*domain.Panel {
+	// Nothing used to record how long a panel took, so the cost of a page was
+	// only ever visible as a wait. These sit at debug level: they answer "which
+	// panel is the slow one" without adding a line per panel to every refresh.
+	pageStarted := time.Now()
+
+	results := make([]*domain.Panel, len(ids))
+	var wg sync.WaitGroup
+	for i, pid := range ids {
 		build, ok := builders[pid]
 		if !ok {
 			continue
 		}
-		panel, err := build(rc)
-		if err != nil {
-			s.log().Warn("panel failed", "panel", pid, "error", err)
-			payload.Add(&domain.Panel{
-				ID:       pid,
-				Title:    pid,
-				Warnings: []string{err.Error()},
-			})
-			continue
-		}
-		payload.Add(panel)
+		wg.Add(1)
+		go func(i int, pid string, build panelBuilder) {
+			defer wg.Done()
+			// recoverPanics wraps the handler's own goroutine and cannot see
+			// this one, so a panic here would end the process rather than the
+			// panel — the exact blast radius that middleware exists to bound.
+			// Builders used to run inline and were covered by it; the recovery
+			// has to move with them.
+			defer func() {
+				rec := recover()
+				if rec == nil {
+					return
+				}
+				s.log().Error("panic while building panel", "panel", pid, "panic", rec,
+					"stack", string(debug.Stack()))
+				results[i] = warnPanel(pid, fmt.Errorf("패널을 만들지 못했습니다: %v", rec))
+			}()
+			started := time.Now()
+			panel, err := build(rc)
+			s.log().Debug("panel built", "page", page, "panel", pid,
+				"ms", time.Since(started).Milliseconds(), "failed", err != nil)
+			if err != nil {
+				s.log().Warn("panel failed", "panel", pid, "error", err)
+				results[i] = warnPanel(pid, err)
+				return
+			}
+			results[i] = panel
+		}(i, pid, build)
 	}
-	s.finish(w, payload)
+	wg.Wait()
+	s.log().Debug("page built", "page", page, "panels", len(ids),
+		"ms", time.Since(pageStarted).Milliseconds())
+	return results
+}
+
+// warnPanel stands in for a panel that could not be built, so the rest of the
+// page still renders and the gap says why it is there.
+func warnPanel(id string, err error) *domain.Panel {
+	return &domain.Panel{
+		ID:       id,
+		Title:    id,
+		Warnings: []string{err.Error()},
+	}
 }
 
 // finish validates the payload before it goes out. A series that has drifted
