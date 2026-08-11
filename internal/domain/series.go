@@ -45,10 +45,40 @@ func P(v float64) Point { return &v }
 // Series is one line on a chart, aligned index-for-index with the enclosing
 // payload's Timestamps.
 type Series struct {
-	Label  string  `json:"label"`
-	Unit   Unit    `json:"unit"`
-	Color  string  `json:"color,omitempty"`
+	Label string `json:"label"`
+	Unit  Unit   `json:"unit"`
+	Color string `json:"color,omitempty"`
+
+	// Dash is the line pattern the frontend draws this series with. It is the
+	// second channel a chart has, and it exists so colour can be spent on
+	// something else: on the pod-CPU panel colour names the pod and the dash
+	// names which of the two CPU metrics the line is. Empty is a solid line, so
+	// every panel that never sets it is unaffected.
+	Dash string `json:"dash,omitempty"`
+
 	Values []Point `json:"values"`
+}
+
+// Line patterns. Solid is the zero value on purpose: a series that says nothing
+// about its dash gets the line every panel drew before this existed.
+const (
+	DashSolid  = ""
+	DashDashed = "dashed"
+	DashDotted = "dotted"
+)
+
+// variantDashes is indexed by the position of a metric within its panel.
+var variantDashes = []string{DashSolid, DashDashed, DashDotted}
+
+// VariantDash gives the i-th metric on a panel its own line pattern, so two
+// metrics of the same subject stay one colour and still read apart. It cycles
+// rather than running out; a panel with more than three metrics on one chart is
+// already unreadable for reasons a dash cannot fix.
+func VariantDash(i int) string {
+	if i < 0 {
+		i = 0
+	}
+	return variantDashes[i%len(variantDashes)]
 }
 
 // NewSeries allocates a series of n gaps, ready to be filled by index.

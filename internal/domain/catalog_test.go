@@ -297,3 +297,38 @@ func TestPodStatusCoversTheRequestedStates(t *testing.T) {
 		t.Error("pod status panel has no restart series, leaving crash loops invisible")
 	}
 }
+
+// The palette is the only thing separating one pod's line from another's on a
+// chart that draws twenty of them, so a repeat inside one cycle is a pair of
+// lines nobody can tell apart.
+func TestSubjectPaletteHandsOutDistinctColours(t *testing.T) {
+	seen := map[string]bool{}
+	for i, c := range SubjectPalette {
+		if seen[c] {
+			t.Errorf("SubjectPalette[%d] repeats %q", i, c)
+		}
+		seen[c] = true
+	}
+	if seen[ColorGray] {
+		// Reserved: sumSeries spends it on totals, and a pod drawn in the same
+		// grey as the total line reads as the total.
+		t.Error("the palette hands out systemGray, which already means 'total'")
+	}
+	if len(SubjectPalette) < 8 {
+		t.Errorf("palette holds %d colours; a namespace of that many pods would recycle immediately", len(SubjectPalette))
+	}
+}
+
+// Recycling past the end is fine — running off it is a panic on a live panel.
+func TestSubjectColorCyclesRatherThanRunningOut(t *testing.T) {
+	n := len(SubjectPalette)
+	if got, want := SubjectColor(n), SubjectPalette[0]; got != want {
+		t.Errorf("SubjectColor(%d) = %q, want it to cycle back to %q", n, got, want)
+	}
+	if got := SubjectColor(n*3 + 2); got != SubjectPalette[2] {
+		t.Errorf("SubjectColor wrapped to %q on the third cycle", got)
+	}
+	if got := SubjectColor(-1); got == "" {
+		t.Error("SubjectColor(-1) returned no colour")
+	}
+}

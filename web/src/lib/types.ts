@@ -19,6 +19,8 @@ export interface Series {
 	label: string;
 	unit: Unit;
 	color?: string;
+	/** '', 'dashed' or 'dotted'. Absent means a solid line. */
+	dash?: string;
 	values: Point[];
 }
 

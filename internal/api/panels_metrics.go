@@ -65,14 +65,32 @@ func metricCacheKey(name string, w domain.Window, reqs []awsx.MetricRequest) str
 // Nothing is dropped. The reference implementation's chart silently plotted
 // only the top six series and then recomputed its axes from that subset, so the
 // axis described less data than the panel claimed to show.
-func toSeries(w domain.Window, list []awsx.MetricSeries, spec domain.MetricSpec, labelFor func(awsx.MetricSeries) string) []*domain.Series {
+//
+// styleFor overrides the spec's colour and gives the line a dash pattern. It is
+// nil everywhere the spec's own colour is the answer — a WAF panel's 차단 line
+// is systemPink because blocking is what it means, and a per-series palette
+// would destroy that. It is set on the panels where one spec fans out into one
+// line per pod or node, and colour has to name the subject instead.
+func toSeries(
+	w domain.Window,
+	list []awsx.MetricSeries,
+	spec domain.MetricSpec,
+	labelFor func(awsx.MetricSeries) string,
+	styleFor func(awsx.MetricSeries) (color, dash string),
+) []*domain.Series {
 	out := make([]*domain.Series, 0, len(list))
 	for _, m := range list {
 		label := spec.Label
 		if labelFor != nil {
 			label = labelFor(m)
 		}
-		out = append(out, m.ToSeries(w, label, spec.Unit, spec.Color))
+		color, dash := spec.Color, domain.DashSolid
+		if styleFor != nil {
+			color, dash = styleFor(m)
+		}
+		s := m.ToSeries(w, label, spec.Unit, color)
+		s.Dash = dash
+		out = append(out, s)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i].Max(), out[j].Max()
@@ -210,7 +228,7 @@ func (s *Service) buildTargetGroupPanel(rc requestCtx) (*domain.Panel, error) {
 		for _, fs := range sets {
 			list := results[spec.Key+"|"+fs.id]
 			awsx.SortSeries(list)
-			series := toSeries(rc.w, list, spec, setSeriesLabel(sets, fs, spec, len(list)))
+			series := toSeries(rc.w, list, spec, setSeriesLabel(sets, fs, spec, len(list)), nil)
 			panel.Series = append(panel.Series, series...)
 			byKey[spec.Key] = append(byKey[spec.Key], series...)
 		}
@@ -324,24 +342,46 @@ func (s *Service) buildResourcePanel(rc requestCtx, id, title string, specs []do
 		return nil, err
 	}
 
+	// Two passes over the fetched results, because both the colour and the
+	// count depend on the whole panel rather than on one spec.
 	empty := true
-	for _, spec := range specs {
+	live := make([][]awsx.MetricSeries, len(specs))
+	gone := make([]int, len(specs))
+	for i, spec := range specs {
 		list := results[spec.Key+"|cluster"]
 		if len(list) > 0 {
+			// Deliberately before the filter: a cluster that publishes nothing
+			// and a cluster whose old nodes are all that matched are different
+			// facts, and only the first one is about Container Insights.
 			empty = false
 		}
-		awsx.SortSeries(list)
-		series := toSeries(rc.w, list, spec, func(m awsx.MetricSeries) string {
-			return m.Label + " · " + spec.Label
-		})
+		live[i], gone[i] = dropSilent(list)
+		awsx.SortSeries(live[i])
+	}
+
+	subject := subjectIndex(live)
+	for i, spec := range specs {
+		dash := domain.VariantDash(i)
+		series := toSeries(rc.w, live[i], spec,
+			func(m awsx.MetricSeries) string { return m.Label + " · " + spec.Label },
+			func(m awsx.MetricSeries) (string, string) {
+				return domain.SubjectColor(subject[m.Label]), dash
+			})
 		panel.Series = append(panel.Series, series...)
 
+		basis := fmt.Sprintf("%s %s, %s %d개", spec.MetricName, spec.Stat, noun, len(series))
+		if gone[i] > 0 {
+			// Said rather than left silent, but said in the basis and not as a
+			// panel warning: a warning turns the whole card red, and a cluster
+			// rebuilt last week would light it up permanently for no fault.
+			basis += fmt.Sprintf(" (구간 내 데이터 없음 %d개 제외)", gone[i])
+		}
 		panel.Stats = append(panel.Stats, domain.Stat{
 			Key:    spec.Key + ".max",
 			Label:  "최대 " + spec.Label,
 			Unit:   spec.Unit,
 			Value:  reduceAcross(series, (*domain.Series).Max, maxOf),
-			Basis:  fmt.Sprintf("%s %s, %s %d개", spec.MetricName, spec.Stat, noun, len(series)),
+			Basis:  basis,
 			Intent: spec.Intent,
 		})
 	}
@@ -350,6 +390,57 @@ func (s *Service) buildResourcePanel(rc requestCtx, id, title string, specs []do
 		panel.Warn("Container Insights 지표가 없습니다. 클러스터에서 Container Insights가 활성화되어 있는지 확인하세요.")
 	}
 	return panel, nil
+}
+
+// dropSilent removes the results that carry no sample in the window, returning
+// what is left and how many went.
+//
+// A SEARCH matches CloudWatch's metric index, not the data in the requested
+// span, and the index keeps a metric for about a fortnight after its last
+// datapoint. Every node the cluster has ever run therefore comes back — a
+// rebuilt cluster answers with a fresh InstanceId each time — and each one drew
+// an all-gap line, took a legend row, and counted towards the panel's "노드 N개".
+// One live node read as a dozen.
+//
+// Only the fan-out panels call this. Where the subject is one the operator
+// picked — a target group, an RDS proxy — an empty series is the answer to
+// their question and has to stay on the chart.
+func dropSilent(list []awsx.MetricSeries) ([]awsx.MetricSeries, int) {
+	out := make([]awsx.MetricSeries, 0, len(list))
+	for _, m := range list {
+		if len(m.Points) > 0 {
+			out = append(out, m)
+		}
+	}
+	return out, len(list) - len(out)
+}
+
+// subjectIndex numbers the subjects a panel draws, so a colour can be looked up
+// by pod or node rather than by position in one spec's list.
+//
+// The numbering is over the union across specs and taken in label order, which
+// buys two things. A pod's CPU line and its over-limit line are the same
+// colour, because they are the same pod. And the colour does not move when the
+// next poll reorders the series — toSeries sorts by value, so the busiest pod
+// changes places constantly.
+func subjectIndex(live [][]awsx.MetricSeries) map[string]int {
+	seen := map[string]bool{}
+	var labels []string
+	for _, list := range live {
+		for _, m := range list {
+			if !seen[m.Label] {
+				seen[m.Label] = true
+				labels = append(labels, m.Label)
+			}
+		}
+	}
+	sort.Strings(labels)
+
+	idx := make(map[string]int, len(labels))
+	for i, l := range labels {
+		idx[l] = i
+	}
+	return idx
 }
 
 func (s *Service) buildCountsPanel(rc requestCtx) (*domain.Panel, error) {
@@ -377,10 +468,10 @@ func (s *Service) buildCountsPanel(rc requestCtx) (*domain.Panel, error) {
 	}
 	podSpec, nodeSpec, failedSpec := byKey["count.pods"], byKey["count.nodes"], byKey["count.nodes.failed"]
 
-	podParts := toSeries(rc.w, results["count.pods|cluster"], podSpec, func(m awsx.MetricSeries) string { return m.Label })
+	podParts := toSeries(rc.w, results["count.pods|cluster"], podSpec, func(m awsx.MetricSeries) string { return m.Label }, nil)
 	pods := sumSeries(rc.w, podParts, "실행 중 팟", podSpec.Unit, podSpec.Color)
-	nodes := toSeries(rc.w, results["count.nodes|cluster"], nodeSpec, func(awsx.MetricSeries) string { return nodeSpec.Label })
-	failed := toSeries(rc.w, results["count.nodes.failed|cluster"], failedSpec, func(awsx.MetricSeries) string { return failedSpec.Label })
+	nodes := toSeries(rc.w, results["count.nodes|cluster"], nodeSpec, func(awsx.MetricSeries) string { return nodeSpec.Label }, nil)
+	failed := toSeries(rc.w, results["count.nodes.failed|cluster"], failedSpec, func(awsx.MetricSeries) string { return failedSpec.Label }, nil)
 
 	panel.Series = append(panel.Series, pods)
 	panel.Series = append(panel.Series, nodes...)
@@ -460,7 +551,7 @@ func (s *Service) buildPodStatusPanel(rc requestCtx) (*domain.Panel, error) {
 		if len(list) > 0 {
 			empty = false
 		}
-		parts := toSeries(rc.w, list, spec, func(m awsx.MetricSeries) string { return m.Label })
+		parts := toSeries(rc.w, list, spec, func(m awsx.MetricSeries) string { return m.Label }, nil)
 		total := sumSeries(rc.w, parts, spec.Label, spec.Unit, spec.Color)
 		panel.Series = append(panel.Series, total)
 
@@ -515,7 +606,7 @@ func (s *Service) buildRDSProxyPanel(rc requestCtx) (*domain.Panel, error) {
 		for _, fs := range sets {
 			list := results[spec.Key+"|"+fs.id]
 			awsx.SortSeries(list)
-			series := toSeries(rc.w, list, spec, setSeriesLabel(sets, fs, spec, len(list)))
+			series := toSeries(rc.w, list, spec, setSeriesLabel(sets, fs, spec, len(list)), nil)
 			panel.Series = append(panel.Series, series...)
 			byKey[spec.Key] = append(byKey[spec.Key], series...)
 		}
@@ -572,7 +663,7 @@ func (s *Service) buildWAFMetricsPanel(rc requestCtx) (*domain.Panel, error) {
 		for _, fs := range sets {
 			list := results[spec.Key+"|"+fs.id]
 			awsx.SortSeries(list)
-			series := toSeries(rc.w, list, spec, setSeriesLabel(sets, fs, spec, len(list)))
+			series := toSeries(rc.w, list, spec, setSeriesLabel(sets, fs, spec, len(list)), nil)
 			panel.Series = append(panel.Series, series...)
 			byKey[spec.Key] = append(byKey[spec.Key], series...)
 		}

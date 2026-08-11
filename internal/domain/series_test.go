@@ -245,3 +245,40 @@ func TestWindowJSONMatchesWindow(t *testing.T) {
 		t.Errorf("timestamps = %d, want %d", len(j.Timestamps), w.Buckets())
 	}
 }
+
+// Colour names the subject on a fan-out panel, so the metric has to be readable
+// from the line itself. The first metric stays solid: a panel that never sets a
+// dash must look exactly as it did before dashes existed.
+func TestVariantDashSeparatesTheMetricsOnOnePanel(t *testing.T) {
+	if got := VariantDash(0); got != DashSolid {
+		t.Errorf("VariantDash(0) = %q, want a solid line", got)
+	}
+	if VariantDash(1) == VariantDash(0) {
+		t.Error("the second metric on a panel draws the same line as the first")
+	}
+	if VariantDash(2) == VariantDash(1) || VariantDash(2) == VariantDash(0) {
+		t.Error("the third metric reuses a line pattern already on the chart")
+	}
+	if got, want := VariantDash(3), VariantDash(0); got != want {
+		t.Errorf("VariantDash(3) = %q, want it to cycle back to %q", got, want)
+	}
+	if got := VariantDash(-1); got != DashSolid {
+		t.Errorf("VariantDash(-1) = %q, want the solid default", got)
+	}
+}
+
+// The zero value has to be the solid line, or every panel that does not set a
+// dash silently changes how it draws.
+func TestASeriesWithNoDashIsSolidAndOmittedFromTheWire(t *testing.T) {
+	s := NewSeries("p99", UnitMillis, "systemBlue", 2)
+	if s.Dash != DashSolid {
+		t.Errorf("a fresh series has dash %q, want solid", s.Dash)
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "dash") {
+		t.Errorf("a solid series serialises its dash: %s", b)
+	}
+}

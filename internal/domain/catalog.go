@@ -64,8 +64,40 @@ const (
 	ColorRed    = "systemRed"
 	ColorTeal   = "systemTeal"
 	ColorYellow = "systemYellow"
+	ColorMint   = "systemMint"
 	ColorGray   = "systemGray"
 )
+
+// SubjectPalette colours one subject — a pod, a node — on a panel where a
+// single spec fans out into many series.
+//
+// A spec's own colour says what the line measures, which is the right answer
+// when a chart holds one line per metric. It is the wrong answer when the
+// SEARCH fans out: every pod on the CPU panel took ColorIndigo, so twenty pods
+// drew twenty identical lines and the legend text was the only way to tell them
+// apart. Colour has to carry the subject there, and the metric moves to the
+// line's dash pattern — see VariantDash.
+//
+// The order is not the constant block's. Neighbouring entries are kept apart
+// under red-green and blue-yellow colour vision deficiency, so a chart with
+// three pods on it does not hand out three colours that some readers see as
+// one. ColorGray is excluded: sumSeries already spends it on totals.
+var SubjectPalette = []string{
+	ColorBlue, ColorOrange, ColorGreen, ColorPink, ColorPurple,
+	ColorYellow, ColorTeal, ColorRed, ColorIndigo, ColorMint,
+}
+
+// SubjectColor picks the palette entry for the i-th subject, cycling when a
+// panel holds more subjects than the palette has colours. Past that point the
+// dash pattern and the legend label are what separate two lines; the caller is
+// expected to order subjects deterministically so a colour does not move
+// between refreshes.
+func SubjectColor(i int) string {
+	if i < 0 {
+		i = 0
+	}
+	return SubjectPalette[i%len(SubjectPalette)]
+}
 
 // TargetGroupMetrics covers requirement 3: target response time, 5xx and 4xx.
 func TargetGroupMetrics() []MetricSpec {

@@ -19,6 +19,26 @@ describe('tooltipRows', () => {
 		expect(omitted).toBe(0);
 	});
 
+	it('carries the line pattern into the readout, not just the colour', () => {
+		// On a pod panel two rows share a colour on purpose — they are the same
+		// pod — and the pattern is the only thing saying which metric each one
+		// is. A readout that dropped it would be ambiguous exactly where the
+		// chart is not.
+		const pod: Series[] = [
+			{ label: 'checkout · CPU 사용률', unit: '%', color: 'systemBlue', values: [4] },
+			{
+				label: 'checkout · CPU 사용률 (limit 대비)',
+				unit: '%',
+				dash: 'dashed',
+				color: 'systemBlue',
+				values: [9]
+			}
+		];
+		const { rows } = tooltipRows(pod, new Set(), 0);
+		expect(rows[0].swatch).toContain('repeating-linear-gradient');
+		expect(rows[1].swatch).toBe(rows[1].color);
+	});
+
 	it('renders a gap as a dash and a measured zero as zero', () => {
 		// The line breaks at a null rather than drawing through it, so the
 		// readout has to make the same distinction the chart does.

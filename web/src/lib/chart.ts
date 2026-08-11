@@ -1,5 +1,5 @@
 import type { Series } from './types';
-import { colorVar, formatValue } from './format';
+import { colorVar, dashSwatch, formatValue } from './format';
 import { wafAction } from './wafAction';
 
 /**
@@ -21,6 +21,8 @@ export interface TooltipRow {
 	label: string;
 	value: string;
 	color: string;
+	/** The swatch's background: the colour, broken up when the line is dashed. */
+	swatch: string;
 	/** A WAF action glyph, or '' when the series is not a WAF action. */
 	icon: string;
 	/** The raw sample the row reports, null for a gap. Ranks the readout. */
@@ -55,11 +57,13 @@ export function tooltipRows(
 		const s = series[i];
 		// `?? null` and not `||`: a measured zero is a value, not a gap.
 		const point = s.values[idx] ?? null;
+		const color = colorVar(s.color);
 		rows.push({
 			index: i,
 			label: s.label,
 			value: formatValue(point, s.unit),
-			color: colorVar(s.color),
+			color,
+			swatch: dashSwatch(color, s.dash),
 			icon: wafAction(s.label)?.icon ?? '',
 			point
 		});

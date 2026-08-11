@@ -1583,6 +1583,217 @@ func TestNodeCountReportsMinimumAndMaximum(t *testing.T) {
 	}
 }
 
+// fixedMetrics answers every query with the same named results, and lets a test
+// say that a result carries no sample at all.
+//
+// The silent case is not a hypothetical. A SEARCH matches CloudWatch's metric
+// index, which holds a metric for about a fortnight after its last datapoint,
+// so every node the cluster has ever run comes back — with nothing in it.
+type fixedMetrics struct{ subjects []fixedSubject }
+
+type fixedSubject struct {
+	label  string
+	silent bool
+}
+
+func liveSubjects(labels ...string) []fixedSubject {
+	out := make([]fixedSubject, 0, len(labels))
+	for _, l := range labels {
+		out = append(out, fixedSubject{label: l})
+	}
+	return out
+}
+
+func (f *fixedMetrics) GetMetricData(_ context.Context, in *cloudwatch.GetMetricDataInput, _ ...func(*cloudwatch.Options)) (*cloudwatch.GetMetricDataOutput, error) {
+	start, end := aws.ToTime(in.StartTime), aws.ToTime(in.EndTime)
+	var out cloudwatch.GetMetricDataOutput
+	for qi, q := range in.MetricDataQueries {
+		period := time.Duration(aws.ToInt32(q.Period)) * time.Second
+		if period <= 0 {
+			period = 5 * time.Minute
+		}
+		for si, sub := range f.subjects {
+			r := cwtypes.MetricDataResult{Id: q.Id, Label: aws.String(sub.label)}
+			if !sub.silent {
+				i := 0
+				for t := start; t.Before(end); t = t.Add(period) {
+					r.Timestamps = append(r.Timestamps, t)
+					r.Values = append(r.Values, float64((qi+1)*10+si*3+i%7))
+					i++
+				}
+			}
+			out.MetricDataResults = append(out.MetricDataResults, r)
+		}
+	}
+	return &out, nil
+}
+
+// withMetrics points a test service at a specific set of CloudWatch answers.
+func withMetrics(t *testing.T, subjects []fixedSubject) http.Handler {
+	t.Helper()
+	svc, h := newTestService(t)
+	svc.Clients.CW = &fixedMetrics{subjects: subjects}
+	return h
+}
+
+// subjectOf recovers the pod or node a series belongs to from its label, which
+// buildResourcePanel forms as "<CloudWatch label> · <metric>".
+func subjectOf(label string) string {
+	if i := strings.Index(label, " · "); i >= 0 {
+		return label[:i]
+	}
+	return label
+}
+
+// A panel whose one spec fans out into one line per pod took the spec's colour
+// for every line, so twenty pods drew twenty identical indigo lines and the
+// legend text was the only thing telling them apart. Colour has to name the
+// subject where the subject is what varies.
+func TestEachPodGetsItsOwnColourOnTheCPUPanel(t *testing.T) {
+	h := withMetrics(t, liveSubjects("checkout-7d9", "search-4b1", "product-2ff"))
+
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-cpu?range=1h&period=5m")), "pod-cpu")
+
+	colors := map[string]string{}
+	for _, s := range panel.Series {
+		subject := subjectOf(s.Label)
+		if prev, ok := colors[subject]; ok && prev != s.Color {
+			t.Errorf("pod %q is drawn in two colours, %q and %q", subject, prev, s.Color)
+		}
+		colors[subject] = s.Color
+	}
+	if len(colors) != 3 {
+		t.Fatalf("panel drew %d pods, want the 3 CloudWatch returned", len(colors))
+	}
+
+	distinct := map[string]bool{}
+	for _, c := range colors {
+		distinct[c] = true
+	}
+	if len(distinct) != len(colors) {
+		t.Errorf("%d pods share %d colours: %v", len(colors), len(distinct), colors)
+	}
+}
+
+// Colour names the pod, so the two CPU metrics of one pod must be the same
+// colour — and then something else has to tell them apart.
+func TestOnePodKeepsOneColourAcrossUsageAndLimit(t *testing.T) {
+	h := withMetrics(t, liveSubjects("checkout-7d9", "search-4b1"))
+
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-cpu?range=1h&period=5m")), "pod-cpu")
+
+	dashes := map[string]map[string]bool{}
+	for _, s := range panel.Series {
+		subject := subjectOf(s.Label)
+		if dashes[subject] == nil {
+			dashes[subject] = map[string]bool{}
+		}
+		dashes[subject][s.Dash] = true
+	}
+	if len(dashes) == 0 {
+		t.Fatal("the panel drew no series")
+	}
+	for subject, seen := range dashes {
+		if len(seen) != 2 {
+			t.Errorf("pod %q draws its two CPU metrics with %d line pattern(s), want 2: %v", subject, len(seen), seen)
+		}
+		if !seen[domain.DashSolid] {
+			t.Errorf("pod %q has no solid line, so nothing on it reads as the plain utilisation", subject)
+		}
+	}
+}
+
+// The colour must survive a refresh. Series are sorted by value, so the busiest
+// pod changes places between polls; a colour taken from that order would make
+// every line change colour whenever the load did.
+func TestSubjectColoursAreStableAcrossRefreshes(t *testing.T) {
+	first := withMetrics(t, liveSubjects("checkout-7d9", "search-4b1", "product-2ff"))
+	second := withMetrics(t, liveSubjects("product-2ff", "checkout-7d9", "search-4b1"))
+
+	colorsOf := func(h http.Handler) map[string]string {
+		panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-cpu?range=1h&period=5m")), "pod-cpu")
+		out := map[string]string{}
+		for _, s := range panel.Series {
+			out[subjectOf(s.Label)] = s.Color
+		}
+		return out
+	}
+
+	a, b := colorsOf(first), colorsOf(second)
+	for subject, color := range a {
+		if b[subject] != color {
+			t.Errorf("pod %q was %q and is now %q after the results came back in a different order", subject, color, b[subject])
+		}
+	}
+}
+
+// One live node read as a dozen. Every instance the cluster had ever run came
+// back from the SEARCH with no samples in it, drew an all-gap line, took a
+// legend row, and counted towards the panel's node total.
+func TestNodesWithNoSamplesInTheWindowAreNotDrawn(t *testing.T) {
+	h := withMetrics(t, []fixedSubject{
+		{label: "prod i-0live ip-10-0-1-9"},
+		{label: "prod i-0dead1 ip-10-0-1-1", silent: true},
+		{label: "prod i-0dead2 ip-10-0-1-2", silent: true},
+		{label: "prod i-0dead3 ip-10-0-1-3", silent: true},
+	})
+
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/node-cpu?range=1h&period=5m")), "node-cpu")
+
+	if len(panel.Series) != 1 {
+		labels := make([]string, 0, len(panel.Series))
+		for _, s := range panel.Series {
+			labels = append(labels, s.Label)
+		}
+		t.Fatalf("panel drew %d nodes for one live node: %v", len(panel.Series), labels)
+	}
+	if !strings.Contains(panel.Series[0].Label, "i-0live") {
+		t.Errorf("the surviving series is %q, not the live node", panel.Series[0].Label)
+	}
+}
+
+// Dropping the dead nodes silently would trade one wrong number for another, so
+// the stat says both what it counted and what it left out.
+func TestNodeBasisCountsOnlyTheNodesItDrew(t *testing.T) {
+	h := withMetrics(t, []fixedSubject{
+		{label: "prod i-0live ip-10-0-1-9"},
+		{label: "prod i-0dead1 ip-10-0-1-1", silent: true},
+		{label: "prod i-0dead2 ip-10-0-1-2", silent: true},
+		{label: "prod i-0dead3 ip-10-0-1-3", silent: true},
+	})
+
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/node-cpu?range=1h&period=5m")), "node-cpu")
+	if len(panel.Stats) == 0 {
+		t.Fatal("the node panel carries no stat")
+	}
+	basis := panel.Stats[0].Basis
+	if !strings.Contains(basis, "노드 1개") {
+		t.Errorf("basis = %q, want it to count the one node it drew", basis)
+	}
+	if !strings.Contains(basis, "3개 제외") {
+		t.Errorf("basis = %q, want it to say how many series it left out", basis)
+	}
+}
+
+// The palette belongs to panels where the subject varies. Where the colour is
+// the meaning — a WAF panel's 차단 line, a latency percentile — it must not move.
+func TestPanelsWithChosenSubjectsKeepTheirSemanticColour(t *testing.T) {
+	_, h := newTestService(t)
+
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/waf-metrics?range=1h&period=5m")), "waf-metrics")
+	for _, s := range panel.Series {
+		if !strings.Contains(s.Label, "차단") {
+			continue
+		}
+		if s.Color != domain.ColorPink {
+			t.Errorf("the 차단 series is %q, not the colour that means blocked", s.Color)
+		}
+		if s.Dash != domain.DashSolid {
+			t.Errorf("the 차단 series took a dash pattern it never asked for: %q", s.Dash)
+		}
+	}
+}
+
 // A different window must not be served from another window's cache entry.
 func TestCacheIsKeyedByWindow(t *testing.T) {
 	svc, h := newTestService(t)

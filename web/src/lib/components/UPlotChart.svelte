@@ -4,7 +4,14 @@
 	import { onDestroy, untrack } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
 	import type { Point, Series } from '$lib/types';
-	import { colorVar, formatAxisTime, formatTimestamp, formatValue } from '$lib/format';
+	import {
+		colorVar,
+		dashPattern,
+		dashSwatch,
+		formatAxisTime,
+		formatTimestamp,
+		formatValue
+	} from '$lib/format';
 	import { tooltipRows } from '$lib/chart';
 	import { wafAction } from '$lib/wafAction';
 
@@ -54,8 +61,8 @@
 
 	/**
 	 * Identifies the *shape* of the chart — how many series, what they are
-	 * called and what colour they take. Data changing does not change this;
-	 * a different set of pods or WAF actions does.
+	 * called, and what colour and line pattern they take. Data changing does not
+	 * change this; a different set of pods or WAF actions does.
 	 *
 	 * The separators are escapes rather than the literal control characters
 	 * they used to be. Written literally they made this a binary file as far
@@ -63,7 +70,9 @@
 	 * "Bin 6661 -> 14508 bytes" and could not be reviewed at all.
 	 */
 	const shapeKey = $derived(
-		series.map((s) => `${s.label}\u0000${s.color ?? ''}\u0000${s.unit}`).join('\u0001')
+		series
+			.map((s) => `${s.label}\u0000${s.color ?? ''}\u0000${s.dash ?? ''}\u0000${s.unit}`)
+			.join('\u0001')
 	);
 	let builtKey = '';
 	let builtHeight = 0;
@@ -165,7 +174,7 @@
 		for (let i = 0; i < rows.length; i++) {
 			const r = rows[i];
 			const [sw, ic, lb, vl] = els[i].children as unknown as HTMLElement[];
-			sw.style.background = r.color;
+			sw.style.background = r.swatch;
 			ic.textContent = r.icon;
 			lb.textContent = r.label;
 			vl.textContent = r.value;
@@ -236,6 +245,7 @@
 				...series.map((s, i) => ({
 					label: s.label,
 					stroke: resolve(colorVar(s.color)),
+					dash: dashPattern(s.dash),
 					width: 1.5,
 					show: !hidden.has(i),
 					// A gap stays a gap: uPlot breaks the line rather than
@@ -358,7 +368,11 @@
 					class:off={hidden.has(i)}
 					title="{s.label} 표시 전환"
 				>
-					<span class="swatch" style:background={colorVar(s.color)} aria-hidden="true"></span>
+					<span
+						class="swatch"
+						style:background={dashSwatch(colorVar(s.color), s.dash)}
+						aria-hidden="true"
+					></span>
 					{#if action}<span class="icon" aria-hidden="true">{action.icon}</span>{/if}
 					<span data-value>{s.label}</span>
 				</button>
@@ -426,15 +440,18 @@
 
 	.tip :global(.tip-row) {
 		display: grid;
-		grid-template-columns: 9px 0.9em 1fr auto;
+		grid-template-columns: 14px 0.9em 1fr auto;
 		align-items: baseline;
 		gap: 5px;
 	}
 
+	/* A line, not a square: the swatch has to show the dash pattern as well as
+	   the colour, because on a pod panel the pattern is what says which of the
+	   two metrics the row is. See dashSwatch in format.ts. */
 	.tip :global(.sw) {
-		width: 9px;
-		height: 9px;
-		border-radius: 2px;
+		width: 14px;
+		height: 3px;
+		border-radius: 1px;
 		align-self: center;
 	}
 
@@ -507,9 +524,9 @@
 	}
 
 	.swatch {
-		width: 9px;
-		height: 9px;
-		border-radius: 2px;
+		width: 14px;
+		height: 3px;
+		border-radius: 1px;
 		flex: none;
 	}
 

@@ -142,6 +142,40 @@ export function colorVar(name: string | undefined): string {
 	return `var(--${kebab}, var(--label-secondary))`;
 }
 
+/**
+ * Maps a backend dash name onto the segment array uPlot strokes with.
+ *
+ * The second channel a chart has. The backend spends colour on the subject —
+ * which pod, which node — so the metric moves here, and a reader who cannot
+ * separate two hues still separates a solid line from a dashed one.
+ *
+ * undefined, not [], for a solid line: uPlot treats an empty array as a dash
+ * pattern of zero-length segments and draws nothing at all.
+ */
+export function dashPattern(name: string | undefined): number[] | undefined {
+	switch (name) {
+		case 'dashed':
+			return [6, 4];
+		case 'dotted':
+			return [2, 3];
+		default:
+			return undefined;
+	}
+}
+
+/**
+ * The same pattern as a CSS background, for the legend and tooltip swatches.
+ *
+ * A swatch that shows only colour is a legend that lies the moment two series
+ * share one: it has to carry both channels the line does.
+ */
+export function dashSwatch(color: string, name: string | undefined): string {
+	const pattern = dashPattern(name);
+	if (!pattern) return color;
+	const [on, off] = pattern;
+	return `repeating-linear-gradient(90deg, ${color} 0 ${on}px, transparent ${on}px ${on + off}px)`;
+}
+
 export function intentVar(intent: string | undefined): string {
 	switch (intent) {
 		case 'good':
