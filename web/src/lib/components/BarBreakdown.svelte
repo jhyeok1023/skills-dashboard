@@ -22,6 +22,12 @@
 
 	let { items, title, color = 'var(--system-blue)', height = 200 }: Props = $props();
 
+	// layerchart's tooltip fade is JS-driven (svelte/transition), so the global
+	// reduced-motion CSS override in app.css never reaches it — the duration
+	// has to be zeroed here. Read once: the OS preference does not change
+	// mid-session in any way worth a listener.
+	const fadeDuration = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 100;
+
 	const data = $derived(items.map((d) => ({ key: d.key, value: d.value })));
 	const total = $derived(items.reduce((sum, d) => sum + d.value, 0));
 </script>
@@ -52,7 +58,7 @@
 				y="key"
 				axis="x"
 				orientation="horizontal"
-				props={{ bars: { fill: color } }}
+				props={{ bars: { fill: color }, tooltip: { root: { fadeDuration } } }}
 			/>
 		</div>
 		<!-- The chart shows shape; the list carries the exact figures, because a

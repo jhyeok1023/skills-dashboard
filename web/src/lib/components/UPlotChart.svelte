@@ -44,6 +44,7 @@
 	let tip: HTMLDivElement | null = null;
 	let chart: uPlot | null = null;
 	let observer: ResizeObserver | null = null;
+	let resizeTimer: ReturnType<typeof setTimeout> | undefined;
 	let themeObserver: MutationObserver | null = null;
 	// Which series the legend has switched off. Nothing is ever dropped for the
 	// user; this only reflects what they chose to hide.
@@ -147,12 +148,32 @@
 		return [...list.children] as HTMLElement[];
 	}
 
+	/** Cursor waiting to be drawn; only the newest one in a frame survives. */
+	let pendingCursor: uPlot | null = null;
+	let tipRaf = 0;
+	/** Sample index the tip DOM currently shows; -1 when hidden or stale. */
+	let renderedIdx = -1;
+	let tipW = 0;
+	let tipH = 0;
+
 	function hideTip() {
 		if (tip) tip.style.display = 'none';
+		renderedIdx = -1;
 	}
 
 	function renderTip(u: uPlot) {
-		if (!tip || !wrap) return;
+		// Coalesced to one frame: mousemove fires faster than frames are drawn,
+		// and cursor.sync replays every move on every chart on the page. The
+		// DOM work happens once per frame, on the latest position.
+		pendingCursor = u;
+		if (!tipRaf) tipRaf = requestAnimationFrame(flushTip);
+	}
+
+	function flushTip() {
+		tipRaf = 0;
+		const u = pendingCursor;
+		pendingCursor = null;
+		if (!u || !tip || !wrap) return;
 		const idx = u.cursor.idx;
 		const cl = u.cursor.left;
 		const ct = u.cursor.top;
@@ -161,33 +182,44 @@
 			return;
 		}
 
-		const { rows, omitted } = tooltipRows(series, hidden, idx);
-		if (!rows.length) {
-			hideTip();
-			return;
+		// The text only changes when the cursor crosses to another sample;
+		// between samples only the transform below moves. Skipping the rewrite
+		// also skips the re-measure, so those frames read a clean layout and
+		// force nothing.
+		if (idx !== renderedIdx) {
+			const { rows, omitted } = tooltipRows(series, hidden, idx);
+			if (!rows.length) {
+				hideTip();
+				return;
+			}
+
+			const time = tip.querySelector('.tip-time') as HTMLElement;
+			time.textContent = formatTimestamp(timestamps[idx]);
+
+			const els = tipRowEls(rows.length);
+			for (let i = 0; i < rows.length; i++) {
+				const r = rows[i];
+				const [sw, ic, lb, vl] = els[i].children as unknown as HTMLElement[];
+				sw.style.background = r.swatch;
+				ic.textContent = r.icon;
+				lb.textContent = r.label;
+				vl.textContent = r.value;
+			}
+
+			// The readout is capped, so it has to say so. Silently showing ten of
+			// forty pods would read as "these are the pods", and the legend below
+			// still lists every one of them.
+			const more = tip.querySelector('.tip-more') as HTMLElement;
+			more.textContent = omitted > 0 ? `외 ${omitted}개` : '';
+			more.style.display = omitted > 0 ? 'block' : 'none';
+
+			tip.style.display = 'block';
+			renderedIdx = idx;
+			// One forced layout per sample change, not per pointer event; the
+			// size feeds the edge flip below until the content changes again.
+			tipW = tip.offsetWidth;
+			tipH = tip.offsetHeight;
 		}
-
-		const time = tip.querySelector('.tip-time') as HTMLElement;
-		time.textContent = formatTimestamp(timestamps[idx]);
-
-		const els = tipRowEls(rows.length);
-		for (let i = 0; i < rows.length; i++) {
-			const r = rows[i];
-			const [sw, ic, lb, vl] = els[i].children as unknown as HTMLElement[];
-			sw.style.background = r.swatch;
-			ic.textContent = r.icon;
-			lb.textContent = r.label;
-			vl.textContent = r.value;
-		}
-
-		// The readout is capped, so it has to say so. Silently showing ten of
-		// forty pods would read as "these are the pods", and the legend below
-		// still lists every one of them.
-		const more = tip.querySelector('.tip-more') as HTMLElement;
-		more.textContent = omitted > 0 ? `외 ${omitted}개` : '';
-		more.style.display = omitted > 0 ? 'block' : 'none';
-
-		tip.style.display = 'block';
 
 		// uPlot's bbox is in device pixels; the cursor is in CSS pixels
 		// relative to the plotting area.
@@ -200,8 +232,8 @@
 		let y = py + gap;
 		// Flip to the other side of the cursor at the edges so the readout is
 		// never cut off by the panel.
-		if (x + tip.offsetWidth > wrap.clientWidth) x = Math.max(0, px - tip.offsetWidth - gap);
-		if (y + tip.offsetHeight > wrap.clientHeight) y = Math.max(0, py - tip.offsetHeight - gap);
+		if (x + tipW > wrap.clientWidth) x = Math.max(0, px - tipW - gap);
+		if (y + tipH > wrap.clientHeight) y = Math.max(0, py - tipH - gap);
 
 		// transform only: no layout, no paint of the surrounding panel, and no
 		// transition — the readout tracks the pointer instead of chasing it.
@@ -275,6 +307,8 @@
 		if (hidden.has(i)) hidden.delete(i);
 		else hidden.add(i);
 		chart?.setSeries(i + 1, { show: !hidden.has(i) });
+		// The row set changed under the same sample index.
+		renderedIdx = -1;
 	}
 
 	// Mount, resize and theme. Deliberately does not depend on the data: a
@@ -294,9 +328,19 @@
 		wrap?.addEventListener('pointerenter', enter);
 		wrap?.addEventListener('pointerleave', leave);
 
+		// A window drag delivers a new width every frame, and setSize
+		// reallocates the canvas and redraws the whole chart — per panel.
+		// Trailing debounce: the chart re-fits once, when the drag settles,
+		// and a size that ends up unchanged does not redraw at all.
 		observer = new ResizeObserver((entries) => {
 			const w = entries[0]?.contentRect.width;
-			if (chart && w && w > 0) chart.setSize({ width: w, height: builtHeight });
+			if (!w || w <= 0) return;
+			clearTimeout(resizeTimer);
+			resizeTimer = setTimeout(() => {
+				if (chart && Math.round(w) !== Math.round(chart.width)) {
+					chart.setSize({ width: w, height: builtHeight });
+				}
+			}, 100);
 		});
 		observer.observe(host);
 
@@ -311,6 +355,9 @@
 		return () => {
 			wrap?.removeEventListener('pointerenter', enter);
 			wrap?.removeEventListener('pointerleave', leave);
+			cancelAnimationFrame(tipRaf);
+			tipRaf = 0;
+			clearTimeout(resizeTimer);
 			observer?.disconnect();
 			observer = null;
 			themeObserver?.disconnect();
@@ -338,6 +385,9 @@
 				return;
 			}
 			chart.setData(toData());
+			// The values under the cursor changed; the next cursor event must
+			// rewrite the tip even at an unchanged sample index.
+			renderedIdx = -1;
 		});
 	});
 

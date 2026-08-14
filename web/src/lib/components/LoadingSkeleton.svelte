@@ -59,7 +59,7 @@
 
 <style>
 	.skeleton {
-		animation: sk-pulse 1400ms ease-in-out infinite;
+		animation: sk-pulse var(--dur-pulse) var(--ease-in-out) infinite;
 	}
 
 	@keyframes sk-pulse {

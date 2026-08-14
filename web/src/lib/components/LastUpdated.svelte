@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { visibleInterval } from '$lib/visibility';
+
 	/**
 	 * How long ago the data on screen arrived.
 	 *
@@ -23,8 +25,7 @@
 
 	$effect(() => {
 		if (at === null) return;
-		const id = setInterval(() => (now = Date.now()), 1000);
-		return () => clearInterval(id);
+		return visibleInterval(() => (now = Date.now()), 1000);
 	});
 
 	const clock = new Intl.DateTimeFormat(undefined, {

@@ -269,14 +269,11 @@ td.numeric [data-value] {
 	font-size: 12.5px;
 }
 
-/* Click feedback: transform only, so it composites and never reflows the
-   controls beside it. */
-:where(button, .control):active {
-	transform: scale(0.97);
-}
-
-button {
-	transition: transform 120ms ease-out;
+/* Click feedback: an instant background change, no motion. A press is a
+   state, not a movement — the colour appears on the down-frame and leaves on
+   release, so there is nothing to transition and nothing to interrupt. */
+button:active {
+	background: var(--fill-secondary);
 }
 
 .segmented {
@@ -375,7 +372,7 @@ button {
 	background: currentcolor;
 	opacity: 0;
 	pointer-events: none;
-	animation: value-flash 250ms ease-out;
+	animation: value-flash var(--dur-quick) var(--ease-out);
 }
 
 @keyframes spin {
@@ -391,7 +388,7 @@ button {
 	border: 1.5px solid var(--label-quaternary);
 	border-top-color: var(--accent);
 	border-radius: 50%;
-	animation: spin 700ms linear infinite;
+	animation: spin var(--dur-spin) linear infinite;
 	flex: none;
 }
 

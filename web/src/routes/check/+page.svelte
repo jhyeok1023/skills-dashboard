@@ -3,6 +3,7 @@
 	import { api, ApiFailure } from '$lib/api';
 	import { formatNumber } from '$lib/format';
 	import type { CheckResult, Config } from '$lib/types';
+	import { visibleInterval } from '$lib/visibility';
 
 	/**
 	 * The traffic check.
@@ -61,11 +62,11 @@
 		}
 	}
 
+	// Quiet while the tab is hidden: this one hits the production service.
 	$effect(() => {
 		const seconds = repeatSeconds;
 		if (seconds <= 0 || !target) return;
-		const id = setInterval(() => void run(), seconds * 1000);
-		return () => clearInterval(id);
+		return visibleInterval(() => void run(), seconds * 1000);
 	});
 
 	function verdict(r: CheckResult): { text: string; intent: string; icon: string } {

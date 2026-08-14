@@ -44,19 +44,17 @@
 	 */
 	let flash = $state(false);
 	let previous: string | undefined;
-	let timer: ReturnType<typeof setTimeout>;
 
 	$effect(() => {
 		const now = display;
 		if (previous !== undefined && previous !== now) {
-			// Restart the animation even if one is already running.
+			// Restart the animation even if one is already running. The class
+			// comes off on animationend below, so the CSS duration is the only
+			// place the flash's length is written down.
 			flash = false;
 			requestAnimationFrame(() => (flash = true));
-			clearTimeout(timer);
-			timer = setTimeout(() => (flash = false), 300);
 		}
 		previous = now;
-		return () => clearTimeout(timer);
 	});
 </script>
 
@@ -66,6 +64,7 @@
 	class:loud
 	data-stat={stat.key}
 	style:color={action?.color ?? intentVar(stat.intent)}
+	onanimationend={() => (flash = false)}
 >
 	<div class="label">
 		{#if action}<span class="icon" aria-hidden="true">{action.icon}</span>{/if}

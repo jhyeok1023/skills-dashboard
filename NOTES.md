@@ -12,6 +12,14 @@
 ## 결정 로그
 <!-- append -->
 
+### 2026-08-14 모션은 역할별 토큰으로, 폴링은 보이는 탭에서만, 툴팁은 프레임당 한 번
+
+- 맥락: 체감 반응성 감사. 큰 위반은 세 가지였다 — ⓐ 차트 툴팁이 mousemove마다 텍스트를 갈아치운 직후 `offsetWidth`를 읽어 강제 동기 레이아웃을 만들고, `cursor.sync`가 이를 페이지의 모든 차트에 복제했다. ⓑ `visibilitychange` 처리가 전혀 없어 숨긴 탭에서도 자동 새로고침(유료 Insights 스캔)과 트래픽 점검(프로덕션 GET)이 계속 나갔다 — "바이트당 과금이라 기본 꺼짐"을 택한 코드가 배경 탭은 막지 않고 있었다. ⓒ 새로고침 중 화면에 낡은 데이터가 낡았다는 표시 없이 남았다(창 변경 후 최대 90초).
+- 채택: ⓐ 툴팁을 rAF 1회로 병합하고, 텍스트 재작성과 측정은 커서가 샘플 경계를 넘을 때만 한다(`renderedIdx`) — 사이 프레임은 transform 한 줄. swatch·아이콘은 시리즈 배열 단위 WeakMap 캐시. 리사이즈는 trailing 100ms 디바운스. ⓑ `visibleInterval`(lib/visibility.ts) 하나로 세 인터벌을 감쌈 — 숨김 중 틱은 건너뛰고, 놓친 게 있으면 복귀 즉시 1회. ⓒ 그리드에 `aria-busy` + opacity 0.6, 복귀는 무전환(새 데이터의 등장 자체가 피드백). duration/easing은 tokens.css의 역할별 토큰(`--dur-*`, `--ease-*`)으로 모으고, StatTile의 JS 300ms 타이머는 `animationend`로 대체해 flash 길이의 출처를 CSS 한 곳으로 줄였다. 눌림 scale(0.97)은 전부 제거하고 `button:active` 배경색으로 바꿨다 — input까지 전환 없이 snap하던 것이 조잡하다는 판단.
+- 기각: ⓐ 툴팁 크기를 상수로 고정 — 내용에 따라 폭이 변해 가장자리 플립이 틀어진다. ⓑ 복귀 시 갱신 없이 다음 틱 대기 — 30분 숨겼다 돌아오면 최대 인터벌만큼 낡은 화면을 본다. reduced-motion 토큰 오버라이드 — app.css의 전역 `!important` 블록이 서드파티 CSS까지 이미 덮는다.
+- 대가: layerchart 툴팁의 reduced-motion은 CSS로 막을 수 없어(`svelte/transition` fade는 JS 구동) `fadeDuration=0`을 마운트 시점에 한 번 읽어 넘긴다 — 세션 중 OS 설정 변경은 새로고침 전까지 반영되지 않는다. 툴팁이 열린 채 데이터가 갱신되면 커서가 움직이기 전까지 낡은 값이 남는 기존 동작은 그대로다(`renderedIdx` 리셋으로 악화만 방지).
+- 확인 못 한 것: `e2e/check.e2e.ts:81`(대상 미설정 화면)은 이 변경 전 HEAD에서도 같은 `SyntaxError: Unexpected end of JSON input`으로 실패한다 — 픽스처의 `route.fetch()` 경로 문제로 보이며 이번 범위 밖.
+
 ### 2026-08-10 SEARCH 스키마의 차원 집합은 문서에서 확인하고, 테스트가 그 표를 들고 있는다
 
 - 맥락: 노드 리소스와 팟 상태 패널이 처음부터 비어 있었다. 원인은 같다 — `MetricSpec.Dimensions`가 **게시되지 않는 차원 집합**이었다. `NodeResourceMetrics`는 `{ClusterName, NodeName}`인데 Container Insights가 노드 지표를 게시하는 집합은 `{NodeName, ClusterName, InstanceId}`와 `{ClusterName}` 둘뿐이고, `PodStatusMetrics`는 `{ClusterName, Namespace}`인데 `pod_status_*` 와 `pod_number_of_container_restarts` 에는 그 집합이 아예 없다(팟 단위 집합은 `{PodName, Namespace, ClusterName}`). SEARCH 스키마는 **집합으로** 매칭되므로 이름 하나가 남거나 모자라면 매칭이 0건이 된다. 그리고 `GetMetricData`는 매칭 0건을 에러가 아니라 빈 결과로 돌려준다 — 쿼리 값은 다 치르고, 화면에는 "조용한 클러스터"와 구분되지 않는 빈 차트가 남는다. `pod_cpu_utilization`은 우연히 옳은 집합이라 동작했고, 그래서 이 계열 전체가 맞는 것처럼 보였다.

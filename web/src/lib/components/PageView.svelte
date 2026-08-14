@@ -6,6 +6,7 @@
 	import { api, ApiFailure } from '$lib/api';
 	import { timeRange } from '$lib/timerange.svelte';
 	import type { Payload } from '$lib/types';
+	import { visibleInterval } from '$lib/visibility';
 	import LoadingSkeleton from './LoadingSkeleton.svelte';
 	import PanelCard from './PanelCard.svelte';
 	import TimeRangePicker from './TimeRangePicker.svelte';
@@ -103,12 +104,12 @@
 		void load();
 	});
 
-	// Auto-refresh, off unless the operator asks for it.
+	// Auto-refresh, off unless the operator asks for it — and quiet while the
+	// tab is hidden: each tick is a paid Insights scan nobody is looking at.
 	$effect(() => {
 		const seconds = timeRange.refreshSeconds;
 		if (seconds <= 0) return;
-		const id = setInterval(() => timeRange.refresh(), seconds * 1000);
-		return () => clearInterval(id);
+		return visibleInterval(() => timeRange.refresh(), seconds * 1000);
 	});
 </script>
 
@@ -139,7 +140,9 @@
 				<p class="warning" data-value>{warning}</p>
 			{/each}
 		{/if}
-		<div class="grid">
+		<!-- aria-busy is only ever true during a refresh: on first load there is
+		     no payload yet and the skeleton renders instead of this grid. -->
+		<div class="grid" aria-busy={loading}>
 			{#each payload.panels as panel (panel.id)}
 				<PanelCard {panel} window={payload.window} />
 			{/each}
@@ -196,5 +199,13 @@
 	.error h2 {
 		margin-bottom: 6px;
 		color: var(--intent-bad);
+	}
+
+	/* A refresh keeps the old numbers on screen (see load()), so while one is
+	   in flight the grid has to look stale, not current. Opacity only — it
+	   composites, and the dip appears within the same tick as the click. */
+	.grid[aria-busy='true'] {
+		opacity: 0.6;
+		transition: opacity var(--dur-instant) var(--ease-out);
 	}
 </style>

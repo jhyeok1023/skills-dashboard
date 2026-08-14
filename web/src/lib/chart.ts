@@ -45,26 +45,53 @@ export interface Readout {
  */
 export const MAX_TOOLTIP_ROWS = 10;
 
+interface SeriesStyle {
+	color: string;
+	swatch: string;
+	icon: string;
+}
+
+/**
+ * Colour, swatch and icon depend on the series alone, never on the cursor,
+ * but this readout is rebuilt every time the cursor crosses a sample. Cached
+ * per series array — a refresh delivers a new array and naturally starts a
+ * new entry — so a 200-series panel pays the regexes once per payload instead
+ * of once per hover step.
+ */
+const styleCache = new WeakMap<Series[], SeriesStyle[]>();
+
+function seriesStyles(series: Series[]): SeriesStyle[] {
+	let styles = styleCache.get(series);
+	if (!styles) {
+		styles = series.map((s) => {
+			const color = colorVar(s.color);
+			return { color, swatch: dashSwatch(color, s.dash), icon: wafAction(s.label)?.icon ?? '' };
+		});
+		styleCache.set(series, styles);
+	}
+	return styles;
+}
+
 export function tooltipRows(
 	series: Series[],
 	hidden: ReadonlySet<number>,
 	idx: number,
 	limit = MAX_TOOLTIP_ROWS
 ): Readout {
+	const styles = seriesStyles(series);
 	const rows: TooltipRow[] = [];
 	for (let i = 0; i < series.length; i++) {
 		if (hidden.has(i)) continue;
 		const s = series[i];
 		// `?? null` and not `||`: a measured zero is a value, not a gap.
 		const point = s.values[idx] ?? null;
-		const color = colorVar(s.color);
 		rows.push({
 			index: i,
 			label: s.label,
 			value: formatValue(point, s.unit),
-			color,
-			swatch: dashSwatch(color, s.dash),
-			icon: wafAction(s.label)?.icon ?? '',
+			color: styles[i].color,
+			swatch: styles[i].swatch,
+			icon: styles[i].icon,
 			point
 		});
 	}
