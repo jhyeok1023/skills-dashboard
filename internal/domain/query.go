@@ -282,11 +282,16 @@ func (q LogQueries) levelFilter() (string, error) {
 		b.WriteString("| fields '' as rawLevel\n")
 	}
 	// Normalise into two buckets so the series has a stable set of keys.
-	fmt.Fprintf(&b, "| fields lower(rawLevel) as lvl, %s as raw\n", msg)
+	//
+	// The message field is matched in place rather than aliased: PodErrorList
+	// already selects it by name, and Logs Insights refuses to compile a query
+	// that both selects a field and re-aliases it.
+	b.WriteString("| fields tolower(rawLevel) as lvl\n")
 	b.WriteString("| filter lvl in ['error', 'err', 'fatal', 'panic', 'warn', 'warning']\n")
-	b.WriteString("    or (lvl = '' and raw like /(?i)\\b(error|fatal|panic|warn|warning|oomkilled)\\b/)\n")
-	b.WriteString("| fields (lvl in ['warn', 'warning'] or (lvl = '' and raw like /(?i)\\b(warn|warning)\\b/)) as isWarn\n")
-	b.WriteString("| fields (isWarn ? 'warn' : 'error') as level\n")
+	fmt.Fprintf(&b, "    or (lvl = '' and %s like /(?i)\\b(error|fatal|panic|warn|warning|oomkilled)\\b/)\n", msg)
+	fmt.Fprintf(&b, "| fields (lvl in ['warn', 'warning'] or (lvl = '' and %s like /(?i)\\b(warn|warning)\\b/)) as isWarn\n", msg)
+	// if(), not a ternary: Logs Insights has no `? :` and fails at the lexer.
+	b.WriteString("| fields if(isWarn, 'warn', 'error') as level\n")
 	return b.String(), nil
 }
 

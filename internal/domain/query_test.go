@@ -237,6 +237,55 @@ func TestProbeExclusionKeepsLinesThatHaveNoPath(t *testing.T) {
 	}
 }
 
+// Logs Insights rejects unknown syntax at StartQuery with a 400, and the panel
+// degrades to a note rather than an error, so a query that only Go can parse
+// looks like "no errors in this window". A ternary and lower() both shipped
+// that way. Only the two error queries use levelFilter, so they are the pair.
+func TestErrorQueriesUseOnlyLogsInsightsSyntax(t *testing.T) {
+	q := LogQueries{Format: DefaultLogFormat()}
+	w := testWindow(t)
+
+	series, err := q.PodErrorSeries(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := q.PodErrorList(w, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, got := range map[string]Query{
+		"errors.series": series,
+		"errors.list":   list,
+	} {
+		if !strings.Contains(got.Text, "if(isWarn, 'warn', 'error') as level") {
+			t.Errorf("%s does not derive level with if():\n%s", name, got.Text)
+		}
+		// (?i) inside a regex literal is the only legitimate '?'.
+		if strings.Contains(strings.ReplaceAll(got.Text, "(?i)", ""), "?") {
+			t.Errorf("%s carries a '?' outside a regex literal:\n%s", name, got.Text)
+		}
+		if !strings.Contains(got.Text, "tolower(rawLevel)") {
+			t.Errorf("%s does not lowercase with tolower():\n%s", name, got.Text)
+		}
+	}
+
+	// PodErrorList selects the message field by name, and Logs Insights will
+	// not compile a query that also re-aliases it.
+	msg := DefaultLogFormat().MessageField
+	if !strings.Contains(list.Text, ", "+msg+",") {
+		t.Fatalf("list query no longer selects %q, so the message column would be empty:\n%s", msg, list.Text)
+	}
+	for name, got := range map[string]Query{
+		"errors.series": series,
+		"errors.list":   list,
+	} {
+		if strings.Contains(got.Text, msg+" as ") {
+			t.Errorf("%s re-aliases the selected message field:\n%s", name, got.Text)
+		}
+	}
+}
+
 // The list and the aggregate beside it must exclude identically, or the header
 // count and the visible rows describe different populations again.
 func TestProbeExclusionIsIdenticalAcrossListAndAggregate(t *testing.T) {
