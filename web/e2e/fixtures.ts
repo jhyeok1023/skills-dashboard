@@ -93,19 +93,93 @@ const statusPanel = {
 			{ key: 'status', label: '코드', numeric: true, copyable: true },
 			{ key: 'path', label: '경로', mono: true, copyable: true },
 			{ key: 'pod', label: '팟', mono: true, copyable: true },
-			{ key: 'clientIp', label: '클라이언트 IP', mono: true, copyable: true }
+			{ key: 'clientIp', label: '클라이언트 IP', mono: true, copyable: true },
+			// Detail only, and unconditional: these come from the Kubernetes
+			// envelope rather than the application's own line, so they are there
+			// whatever the operator configured. No userAgent here on purpose —
+			// this fixture is the default install, which has no such field.
+			{ key: 'container', label: '컨테이너', detail: true, mono: true, copyable: true },
+			{ key: 'namespace', label: '네임스페이스', detail: true, mono: true, copyable: true }
 		],
 		rows: Array.from({ length: 300 }, () => ({
 			timestamp: '2026-08-10 07:12:04.000',
 			status: '503',
 			path: LONG_PATH,
 			pod: LONG_POD,
-			clientIp: '10.0.3.123'
+			clientIp: '10.0.3.123',
+			container: 'product-api',
+			namespace: 'default'
 		})),
 		// Counted independently of the 300 rows carried.
 		total: 1284,
 		truncated: true,
 		limit: 300
+	}
+};
+
+/**
+ * One row per status code, its paths inside the row.
+ *
+ * The 404 row is the awkward one on purpose: more paths than the detail shows,
+ * so the "외 N개" tail is exercised, and a path long enough to wrap inside the
+ * expanded panel as well as the card.
+ */
+const statusBreakdownPanel = {
+	id: 'pod-status-breakdown',
+	title: '응답 코드별 경로',
+	stats: [
+		{
+			key: 'pod.badStatus.codes',
+			label: '코드 종류',
+			value: 3,
+			unit: 'count',
+			basis: '구간 내 관측된 비정상 응답 코드, /health · /healthcheck 제외'
+		},
+		{
+			key: 'pod.badStatus.byPath.total',
+			label: '비정상 응답',
+			value: 1284,
+			unit: 'count',
+			basis: '코드 · 경로별 집계 합계 (전체), /health · /healthcheck 제외'
+		}
+	],
+	bars: { keyColumn: 'status', valueColumn: 'count' },
+	table: {
+		columns: [
+			{ key: 'status', label: '코드', mono: true, copyable: true },
+			{ key: 'count', label: '건수', numeric: true },
+			{ key: 'paths', label: '경로 종류', numeric: true },
+			{ key: 'timestamp', label: '마지막 발생', mono: true },
+			{ key: 'topPaths', label: '상위 경로', detail: true, mono: true, copyable: true }
+		],
+		rows: [
+			{
+				status: '503',
+				count: 800,
+				paths: 1,
+				timestamp: '2026-08-10 07:44:00.000',
+				topPaths: '/v1/orders (800건)'
+			},
+			{
+				status: '404',
+				count: 420,
+				paths: 24,
+				timestamp: '2026-08-10 07:43:00.000',
+				topPaths: `${LONG_PATH} (300건) · /favicon.ico (80건) · /wp-login.php (40건) · 외 21개`
+			},
+			{
+				status: '403',
+				count: 64,
+				paths: 2,
+				timestamp: '2026-08-10 07:41:00.000',
+				topPaths: '/admin (60건) · /internal/metrics (4건)'
+			}
+		],
+		// The table lists codes and lists all of them, so its total is the row
+		// count and nothing was capped away at this level.
+		total: 3,
+		truncated: false,
+		limit: 20
 	}
 };
 
@@ -462,7 +536,7 @@ const pages: Record<string, unknown[]> = {
 		podStatusPanel,
 		wafTrafficPanel
 	],
-	'pod-logs': [latencyPanel, statusPanel, errorPanel],
+	'pod-logs': [latencyPanel, statusPanel, statusBreakdownPanel, errorPanel],
 	waf: [wafTrafficPanel, breakdownPanel],
 	targetgroup: [targetGroupPanel],
 	kubernetes: [podResourcePanel, countsPanel, podStatusPanel],

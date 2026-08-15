@@ -274,22 +274,23 @@ func (s *Service) handleIdentity(w http.ResponseWriter, _ *http.Request) {
 // guarantees the two produce the same thing.
 func (s *Service) panelBuilders() map[string]panelBuilder {
 	return map[string]panelBuilder{
-		"targetgroup":      s.buildTargetGroupPanel,
-		"pod-cpu":          s.podResourcePanel("pod-cpu", "팟 CPU 사용률", "pod.cpu"),
-		"pod-mem":          s.podResourcePanel("pod-mem", "팟 메모리 사용률", "pod.mem"),
-		"node-cpu":         s.nodeResourcePanel("node-cpu", "노드 CPU 사용률", "node.cpu"),
-		"node-mem":         s.nodeResourcePanel("node-mem", "노드 메모리 사용률", "node.mem"),
-		"node-disk":        s.nodeResourcePanel("node-disk", "노드 디스크 사용률", "node.fs"),
-		"counts":           s.buildCountsPanel,
-		"pod-status":       s.buildPodStatusPanel,
-		"rds-proxy":        s.buildRDSProxyPanel,
-		"waf-metrics":      s.buildWAFMetricsPanel,
-		"pod-latency":      s.buildPodLatencyPanel,
-		"pod-status-codes": s.buildPodStatusCodePanel,
-		"pod-errors":       s.buildPodErrorPanel,
-		"waf-traffic":      s.buildWAFTrafficPanel,
-		"waf-blocked":      s.buildWAFBlockedPanel,
-		"waf-breakdown":    s.buildWAFBreakdownPanel,
+		"targetgroup":          s.buildTargetGroupPanel,
+		"pod-cpu":              s.podResourcePanel("pod-cpu", "팟 CPU 사용률", "pod.cpu"),
+		"pod-mem":              s.podResourcePanel("pod-mem", "팟 메모리 사용률", "pod.mem"),
+		"node-cpu":             s.nodeResourcePanel("node-cpu", "노드 CPU 사용률", "node.cpu"),
+		"node-mem":             s.nodeResourcePanel("node-mem", "노드 메모리 사용률", "node.mem"),
+		"node-disk":            s.nodeResourcePanel("node-disk", "노드 디스크 사용률", "node.fs"),
+		"counts":               s.buildCountsPanel,
+		"pod-status":           s.buildPodStatusPanel,
+		"rds-proxy":            s.buildRDSProxyPanel,
+		"waf-metrics":          s.buildWAFMetricsPanel,
+		"pod-latency":          s.buildPodLatencyPanel,
+		"pod-status-codes":     s.buildPodStatusCodePanel,
+		"pod-status-breakdown": s.buildPodStatusBreakdownPanel,
+		"pod-errors":           s.buildPodErrorPanel,
+		"waf-traffic":          s.buildWAFTrafficPanel,
+		"waf-blocked":          s.buildWAFBlockedPanel,
+		"waf-breakdown":        s.buildWAFBreakdownPanel,
 	}
 }
 
@@ -304,7 +305,7 @@ const pageBudget = 90 * time.Second
 // pages lists which panels each screen shows.
 var pages = map[string][]string{
 	"overview":    {"pod-latency", "pod-status-codes", "targetgroup", "counts", "pod-status", "waf-traffic"},
-	"pod-logs":    {"pod-latency", "pod-status-codes", "pod-errors"},
+	"pod-logs":    {"pod-latency", "pod-status-codes", "pod-status-breakdown", "pod-errors"},
 	"waf":         {"waf-traffic", "waf-blocked", "waf-breakdown", "waf-metrics"},
 	"targetgroup": {"targetgroup"},
 	"kubernetes":  {"pod-cpu", "pod-mem", "node-cpu", "node-mem", "node-disk", "counts", "pod-status"},

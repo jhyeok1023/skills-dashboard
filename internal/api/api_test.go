@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -121,6 +122,11 @@ func classify(q string) string {
 		return "traffic"
 	case strings.Contains(q, "not in [200, 201]") && strings.Contains(q, "sort @timestamp desc"):
 		return "badStatusList"
+	// Before badStatusSeries, which the same filter would otherwise claim. The
+	// two differ by what they group by: the breakdown carries a lastTs and no
+	// bin(), the series carries a bin() and no lastTs.
+	case strings.Contains(q, "not in [200, 201]") && strings.Contains(q, "lastTs"):
+		return "badStatusByPath"
 	case strings.Contains(q, "not in [200, 201]"):
 		return "badStatusSeries"
 	case strings.Contains(q, "as t, level"):
@@ -207,9 +213,23 @@ func rowsFor(kind string) [][]logtypes.ResultField {
 		}
 	case "badStatusSeries":
 		// 1284 non-OK responses in total, far more than the list can carry.
+		// No path: the series groups by bucket and status only, and grouping by
+		// anything unbounded here is what used to truncate it.
 		return [][]logtypes.ResultField{
-			{f("t", bucket(0)), f("status", "503"), f("path", "/healthcheck"), f("n", "800")},
-			{f("t", bucket(1)), f("status", "404"), f("path", "/v1/user"), f("n", "484")},
+			{f("t", bucket(0)), f("status", "503"), f("n", "800")},
+			{f("t", bucket(1)), f("status", "404"), f("n", "484")},
+		}
+	case "badStatusByPath":
+		// The same 1284, split by path. 404 outnumbers 503 in row count while
+		// 503 outweighs it in requests, which is what makes the ordering and the
+		// per-code path cut worth asserting. One row carries no path at all: it
+		// still counts toward its code and must not become a listed path.
+		return [][]logtypes.ResultField{
+			{f("status", "503"), f("path", "/healthcheck"), f("n", "780"), f("lastTs", "2026-08-10 09:44:00.000")},
+			{f("status", "404"), f("path", "/v1/user"), f("n", "300"), f("lastTs", "2026-08-10 09:43:00.000")},
+			{f("status", "404"), f("path", "/favicon.ico"), f("n", "120"), f("lastTs", "2026-08-10 09:42:00.000")},
+			{f("status", "404"), f("path", "/wp-login.php"), f("n", "64"), f("lastTs", "2026-08-10 09:41:00.000")},
+			{f("status", "503"), f("path", ""), f("n", "20"), f("lastTs", "2026-08-10 09:40:00.000")},
 		}
 	case "badStatusList":
 		rows := make([][]logtypes.ResultField, 300)
@@ -217,6 +237,7 @@ func rowsFor(kind string) [][]logtypes.ResultField {
 			rows[i] = []logtypes.ResultField{
 				f("@timestamp", "2026-08-10 09:30:00.000"),
 				f("pod", "api-5cbb6d585d-cr4rd"), f("app", "api"),
+				f("container", "api"), f("namespace", "default"),
 				f("method", "GET"), f("path", "/healthcheck"),
 				f("status", "503"), f("latencyMs", "12.5"), f("clientIp", "10.0.3.123"),
 			}
@@ -453,6 +474,20 @@ func findPanel(t *testing.T, p domain.Payload, id string) *domain.Panel {
 	}
 	t.Fatalf("payload has no panel %q", id)
 	return nil
+}
+
+func statValue(t *testing.T, panel *domain.Panel, key string) float64 {
+	t.Helper()
+	for _, s := range panel.Stats {
+		if s.Key == key {
+			if s.Value == nil {
+				t.Fatalf("panel %q stat %q has no value", panel.ID, key)
+			}
+			return *s.Value
+		}
+	}
+	t.Fatalf("panel %q has no stat %q", panel.ID, key)
+	return 0
 }
 
 // This is the regression line for the defect the rewrite exists to fix: a
@@ -933,15 +968,22 @@ func TestWAFDetailDoesNotInventAResponseCode(t *testing.T) {
 }
 
 // The expander is offered wherever a table declares a detail column, and
-// nowhere else. An aggregate row is already its own summary, so unfolding it
-// would repeat back what is on screen — and the view decides this from the
-// payload alone, never from a panel's name.
-func TestOnlyPerRequestTablesDeclareDetailColumns(t *testing.T) {
+// nowhere else — decided from the payload alone, never from a panel's name.
+//
+// The rule is not "per-request tables only", which is what this asserted when
+// waf-traffic was the only one: it is that a row has to have something left to
+// say. A request row does — the User-Agent and the response note are too long
+// for a column. A status-code row does too: its paths are a list, and a list
+// does not fit in a cell. waf-blocked and waf-breakdown rows are already their
+// own summary, so unfolding one would repeat back what is on screen.
+func TestOnlyRowsWithMoreToSayDeclareDetailColumns(t *testing.T) {
 	_, h := newTestService(t)
 	for panelID, wantDetail := range map[string]bool{
-		"waf-traffic":   true,
-		"waf-blocked":   false,
-		"waf-breakdown": false,
+		"waf-traffic":          true,
+		"pod-status-codes":     true,
+		"pod-status-breakdown": true,
+		"waf-blocked":          false,
+		"waf-breakdown":        false,
 	} {
 		panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/"+panelID+"?range=1h&period=5m")), panelID)
 		got := false
@@ -951,6 +993,178 @@ func TestOnlyPerRequestTablesDeclareDetailColumns(t *testing.T) {
 		if got != wantDetail {
 			t.Errorf("%s has detail columns = %v, want %v", panelID, got, wantDetail)
 		}
+	}
+}
+
+// The pod detail must not be contingent on a setting.
+//
+// It was: the only detail column the panel declared came from userAgentField,
+// which has no default because an access log has a User-Agent only if the
+// application wrote one. So a fresh install got no expander at all on the one
+// table an operator opens to ask "what were these 404s". The two columns that
+// replaced that dependency come from the Kubernetes envelope, which is there
+// whatever the log format says.
+func TestPodStatusDetailDoesNotDependOnAnOptionalField(t *testing.T) {
+	svc, h := newTestService(t)
+	if ua := svc.Store.Get().LogFormat.UserAgentField; ua != "" {
+		t.Fatalf("this test is only meaningful with no user-agent field configured, got %q", ua)
+	}
+
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-status-codes?range=1h&period=5m")), "pod-status-codes")
+	detail := map[string]bool{}
+	for _, c := range panel.Table.Columns {
+		if c.Detail {
+			detail[c.Key] = true
+		}
+	}
+	for _, key := range []string{"container", "namespace"} {
+		if !detail[key] {
+			t.Errorf("%q is not a detail column, so the table offers no expander by default", key)
+		}
+	}
+	if detail["userAgent"] {
+		t.Error("a User-Agent column was declared with no field configured; it would read \"—\"")
+	}
+
+	// Declaring the column is only half of it — the query has to have selected
+	// the value, or the expander opens onto a dash.
+	for _, r := range panel.Table.Rows {
+		if r["container"] == "" || r["container"] == nil {
+			t.Fatalf("a row carries no container: %+v", r)
+		}
+	}
+}
+
+// "404, 403 각각" — one row per status code, its paths inside the row.
+//
+// The fold has to keep every code, not the busiest ones: a flood of 404s and a
+// handful of 403s is the shape that makes this panel worth having, and it is
+// also the shape that a server-side top-N would destroy. And each code's count
+// has to stay in step with the chart on pod-status-codes, which counts the same
+// requests through an entirely different query.
+func TestPodStatusBreakdownFoldsPathsPerCode(t *testing.T) {
+	_, h := newTestService(t)
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-status-breakdown?range=1h&period=5m")), "pod-status-breakdown")
+
+	if panel.Table == nil {
+		t.Fatal("no breakdown table")
+	}
+	// Busiest first, one row each, no code dropped.
+	var codes []string
+	byCode := map[string]domain.Row{}
+	for _, r := range panel.Table.Rows {
+		code := fmt.Sprint(r["status"])
+		if _, dup := byCode[code]; dup {
+			t.Fatalf("status %s appears twice; the paths were not folded", code)
+		}
+		codes = append(codes, code)
+		byCode[code] = r
+	}
+	if want := []string{"503", "404"}; !slices.Equal(codes, want) {
+		t.Errorf("rows are %v, want %v (busiest code first)", codes, want)
+	}
+
+	// 780 + 20, the second of which has no path. A row with no path still
+	// happened, so it counts; it just has no name to list.
+	if got := byCode["503"]["count"]; got != float64(800) {
+		t.Errorf("503 counts %v, want 800 — the pathless row was dropped from the total", got)
+	}
+	if got := byCode["503"]["paths"]; got != float64(1) {
+		t.Errorf("503 lists %v paths, want 1 — the pathless row was offered as a path", got)
+	}
+
+	// Paths inside the row, busiest first, and only in the detail: a list does
+	// not fit in a cell.
+	if got := fmt.Sprint(byCode["404"]["topPaths"]); got != "/v1/user (300건) · /favicon.ico (120건) · /wp-login.php (64건)" {
+		t.Errorf("404 paths = %q", got)
+	}
+
+	// The table lists codes, and it lists all of them, so its total is the row
+	// count and nothing was capped away at this level.
+	if panel.Table.Total != int64(len(panel.Table.Rows)) || panel.Table.Truncated {
+		t.Errorf("table claims total %d over %d rows, truncated=%v",
+			panel.Table.Total, len(panel.Table.Rows), panel.Table.Truncated)
+	}
+
+	// The cross-check that matters: two queries, two panels, one population.
+	other := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-status-codes?range=1h&period=5m")), "pod-status-codes")
+	if want, got := statValue(t, other, "pod.badStatus.total"), statValue(t, panel, "pod.badStatus.byPath.total"); want != got {
+		t.Errorf("the breakdown totals %v where the chart totals %v", got, want)
+	}
+}
+
+// A dashboard with no path field configured still has to render. Every other
+// pod panel degrades in that configuration rather than failing, and this one is
+// reached through a page endpoint that a single returned error turns into a
+// failure card — and through a panel endpoint that answers 502.
+func TestPodStatusBreakdownDegradesWithoutAPathField(t *testing.T) {
+	svc, h := newTestService(t)
+	cfg := svc.Store.Get()
+	cfg.LogFormat.PathField = ""
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.Store.Get().LogFormat.PathField; got != "" {
+		t.Fatalf("clearing pathField was undone by defaults: %q", got)
+	}
+
+	rec := get(t, h, "/api/panel/pod-status-breakdown?range=1h&period=5m")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200 — the panel failed instead of degrading: %s", rec.Code, rec.Body)
+	}
+	panel := findPanel(t, decodePayload(t, rec), "pod-status-breakdown")
+	if len(panel.Warnings) == 0 {
+		t.Error("the panel came back empty without saying why")
+	}
+	// And no query was sent: a breakdown by path with no path field has nothing
+	// to ask for, so it must not pay for a scan to find that out.
+	if panel.Table != nil && len(panel.Table.Rows) > 0 {
+		t.Errorf("rows came back without a path field: %+v", panel.Table.Rows)
+	}
+
+	// The page it lives on renders too, rather than showing a failure card.
+	if rec := get(t, h, "/api/page/pod-logs?range=1h&period=5m"); rec.Code != http.StatusOK {
+		t.Fatalf("pod-logs status %d, want 200", rec.Code)
+	}
+}
+
+// Cutting a path list silently would read as "these are the paths", which for a
+// 404 flood is the opposite of true.
+func TestTopPathsSaysWhatItLeftOut(t *testing.T) {
+	b := statusBucket{code: "404", paths: []pathCount{
+		{"/a", 3}, {"/b", 2}, {"/c", 1},
+	}}
+	if got := topPathsNote(b, 2); got != "/a (3건) · /b (2건) · 외 1개" {
+		t.Errorf("topPathsNote = %q", got)
+	}
+	if got := topPathsNote(b, 10); strings.Contains(got, "외") {
+		t.Errorf("nothing was cut but the note says otherwise: %q", got)
+	}
+	if got := topPathsNote(statusBucket{code: "503"}, 10); !strings.Contains(got, "기록되지") {
+		t.Errorf("a code with no paths at all reads %q", got)
+	}
+}
+
+// A stats result that hit the Insights ceiling is not a smaller answer, it is a
+// wrong one — the rows it kept are whatever came back first, so every total
+// derived from them is short by an unknown amount. Nothing read the flag before
+// this, so a truncated aggregate was drawn as a complete one.
+func TestTruncatedAggregateIsReported(t *testing.T) {
+	panel := &domain.Panel{ID: "p"}
+	warnIfTruncated(panel, "pod.badStatus.byPath", map[string]awsx.QueryResult{
+		"pod.badStatus.byPath": {Truncated: true},
+		"other":                {Truncated: false},
+	})
+	if len(panel.Warnings) != 1 || !strings.Contains(panel.Warnings[0], "pod.badStatus.byPath") {
+		t.Errorf("warnings = %v", panel.Warnings)
+	}
+
+	quiet := &domain.Panel{ID: "p"}
+	warnIfTruncated(quiet, "pod.badStatus.byPath", map[string]awsx.QueryResult{
+		"pod.badStatus.byPath": {Truncated: false},
+	})
+	if len(quiet.Warnings) != 0 {
+		t.Errorf("a complete result warned anyway: %v", quiet.Warnings)
 	}
 }
 

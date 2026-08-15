@@ -114,15 +114,17 @@
 	const hasDetail = $derived(table.columns.length > cols.length);
 
 	/**
-	 * Which row is open, keyed by its content.
+	 * Which row is open: its content, and where it was when it was opened.
 	 *
-	 * Not by index and not by object identity: sorting reorders the rows under
-	 * the operator, and every poll rebuilds `prepared` from a fresh payload. An
-	 * index would leave the detail attached to whatever row later took that
-	 * position, and an object reference would collapse the panel on every
-	 * refresh. Content survives both.
+	 * Content alone is not identity — an access log produces byte-identical
+	 * lines, so the position is what tells the twelfth 404 from the first. The
+	 * position alone is not identity either: sorting reorders the rows under the
+	 * operator and every poll rebuilds `prepared` from a fresh payload, either of
+	 * which would leave the detail attached to whatever row later took that
+	 * index. Holding both, and trusting the index only while the row still reads
+	 * the same, is what survives a sort, a refresh, and a duplicate.
 	 */
-	let openKey = $state<string | null>(null);
+	let open = $state<{ key: string; index: number } | null>(null);
 
 	const filtered = $derived.by(() => {
 		const q = query.trim().toLowerCase();
@@ -155,14 +157,18 @@
 	const visible = $derived(sorted.slice(0, shown));
 	const remaining = $derived(sorted.length - visible.length);
 
-	// findIndex, not a filter: a log table can hold many byte-identical rows,
-	// and opening one must not open all of them.
-	const openIndex = $derived(
-		openKey === null ? -1 : visible.findIndex((r) => r.search === openKey)
-	);
+	// The remembered position first, and only while the row there still holds the
+	// remembered content; a search for that content otherwise. Searching first
+	// would open the topmost duplicate rather than the one that was pressed.
+	const openIndex = $derived.by(() => {
+		const at = open;
+		if (at === null) return -1;
+		if (visible[at.index]?.search === at.key) return at.index;
+		return visible.findIndex((r) => r.search === at.key);
+	});
 
-	function toggle(row: Prepared) {
-		openKey = openKey === row.search ? null : row.search;
+	function toggle(row: Prepared, index: number) {
+		open = index === openIndex ? null : { key: row.search, index };
 	}
 
 	function toggleSort(key: string) {
@@ -249,7 +255,7 @@
 							class:open={i === openIndex}
 							onclick={hasDetail
 								? (e) => {
-										if (!(e.target as HTMLElement).closest('button, a, input')) toggle(row);
+										if (!(e.target as HTMLElement).closest('button, a, input')) toggle(row, i);
 									}
 								: undefined}
 						>
@@ -259,7 +265,7 @@
 										type="button"
 										class="reveal"
 										aria-expanded={i === openIndex}
-										onclick={() => toggle(row)}
+										onclick={() => toggle(row, i)}
 									>
 										<span aria-hidden="true">{i === openIndex ? '▾' : '▸'}</span>
 										<span class="tiny">상세</span>

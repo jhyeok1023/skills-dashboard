@@ -377,6 +377,11 @@ func TestPodBadStatusListSelectsTheCopyableColumns(t *testing.T) {
 	}
 	for _, want := range []string{
 		"kubernetes.pod_name as pod",
+		// From the Kubernetes envelope, so present whatever the operator
+		// configured. They are what lets the panel offer a row detail on a
+		// fresh install instead of only where a User-Agent field was named.
+		"kubernetes.container_name as container",
+		"kubernetes.namespace_name as namespace",
 		"log_processed.path as path",
 		"log_processed.status as status",
 		"log_processed.latency_ms as latencyMs",
@@ -386,6 +391,78 @@ func TestPodBadStatusListSelectsTheCopyableColumns(t *testing.T) {
 		if !strings.Contains(got.Text, want) {
 			t.Errorf("list query is missing %q:\n%s", want, got.Text)
 		}
+	}
+}
+
+// The series query decides whether the "비정상 응답" count is honest, and what
+// decides that is how many rows it asks for: Insights cuts a stats result at
+// InsightsMaxRows and reports nothing about having done so. Grouped by bucket
+// and status the row count is bounded by the window — grouped by path as well,
+// which it used to be for no reader at all, it is bounded by whatever a scanner
+// decides to request, and around eighty distinct paths was enough to truncate a
+// two-hour window silently.
+func TestPodBadStatusSeriesGroupsOnlyByWhatItPlots(t *testing.T) {
+	q := LogQueries{Format: DefaultLogFormat()}
+	got, err := q.PodBadStatusSeries(testWindow(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got.Text, "as path") {
+		t.Errorf("the series groups by path, which nothing plots and which uncaps its row count:\n%s", got.Text)
+	}
+	if !strings.Contains(got.Text, "as t, log_processed.status as status\n") {
+		t.Errorf("the series no longer groups by bucket and status:\n%s", got.Text)
+	}
+}
+
+// The breakdown is what the dropped grouping became. It has to describe exactly
+// the population the series and the list describe — otherwise the panel that
+// answers "which paths made up the 404s" is answering about different 404s —
+// and it has to come back whole.
+func TestPodBadStatusByPathMatchesTheOtherTwoQueries(t *testing.T) {
+	f := DefaultLogFormat()
+	f.Namespace = "prod"
+	f.ExcludePaths = []string{"/health"}
+	q := LogQueries{Format: f}
+
+	byPath, err := q.PodBadStatusByPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	series, err := q.PodBadStatusSeries(testWindow(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same filters, character for character. Two queries that select the same
+	// requests by two similar-looking filters is the failure this prevents.
+	for _, want := range []string{
+		"| filter kubernetes.namespace_name = 'prod'\n",
+		"| filter not ispresent(log_processed.path) or log_processed.path not in ['/health']\n",
+		"| filter ispresent(log_processed.status) and log_processed.status not in [200, 201]\n",
+	} {
+		if !strings.Contains(byPath.Text, want) || !strings.Contains(series.Text, want) {
+			t.Errorf("filter %q is not shared by both queries:\nbyPath:\n%s\nseries:\n%s",
+				want, byPath.Text, series.Text)
+		}
+	}
+
+	if !strings.Contains(byPath.Text, "stats count() as n, max(@timestamp) as lastTs by log_processed.status as status, log_processed.path as path\n") {
+		t.Errorf("byPath does not group by status and path with a last-seen:\n%s", byPath.Text)
+	}
+	// No bin(), or the row count goes back to buckets × statuses × paths and
+	// takes the ceiling with it.
+	if strings.Contains(byPath.Text, "bin(") {
+		t.Errorf("byPath bins, which is what made this grouping unaffordable:\n%s", byPath.Text)
+	}
+	// No limit clause: `sort n desc | limit N` cuts by (status, path) volume, so
+	// a flood of 404s would push a rare 403 out of the result entirely. The cut
+	// to a readable number of paths happens per code, in Go, after every code
+	// has been seen.
+	if strings.Contains(byPath.Text, "| limit") || byPath.Limit != 0 {
+		t.Errorf("byPath caps itself server-side, which drops whole status codes:\n%s", byPath.Text)
+	}
+	if strings.Contains(byPath.Text, "@message") {
+		t.Errorf("byPath selects the raw record:\n%s", byPath.Text)
 	}
 }
 

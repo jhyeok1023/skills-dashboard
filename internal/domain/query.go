@@ -148,7 +148,66 @@ func (q LogQueries) PodTraffic(w Window) (Query, error) {
 // PodBadStatusSeries counts non-OK responses per bucket and status code. It is
 // a complete aggregate, so summing it yields the honest total that the
 // truncated detail list is compared against.
+//
+// It groups by bucket and status and nothing else, deliberately. It used to
+// carry `path` as a third key that no caller ever read, and that key is what
+// decided whether the total was honest: Insights cuts a stats result at
+// InsightsMaxRows, and the row count here is buckets × statuses × paths. At a
+// 5-minute period over two hours that is 24 × 5 × paths, so around eighty
+// distinct paths — one scanner hitting random URLs — was enough to truncate the
+// chart and the "비정상 응답" count beside it, silently. The per-path breakdown
+// now has its own unbinned query, where the same paths cost one row each.
 func (q LogQueries) PodBadStatusSeries(w Window) (Query, error) {
+	status, err := q.processedField(q.Format.StatusField)
+	if err != nil {
+		return Query{}, fmt.Errorf("statusField: %w", err)
+	}
+	ns, err := q.namespaceFilter()
+	if err != nil {
+		return Query{}, err
+	}
+	probes, err := q.excludePathFilter()
+	if err != nil {
+		return Query{}, err
+	}
+
+	var b strings.Builder
+	b.WriteString("fields @timestamp\n")
+	b.WriteString(ns)
+	b.WriteString(probes)
+	fmt.Fprintf(&b, "| filter ispresent(%s) and %s\n", status, notInStatuses(status, q.Format.OKStatuses))
+	fmt.Fprintf(&b, "| stats count() as n by bin(%s) as t, %s as status\n", w.Period, status)
+	b.WriteString("| sort t asc")
+	return Query{ID: "pod.badStatus.series", Text: b.String()}, nil
+}
+
+// PodBadStatusByPath counts non-OK responses per status code and path, over the
+// whole window rather than per bucket.
+//
+// The filter is character-for-character the one PodBadStatusSeries and
+// PodBadStatusList use, so all three describe one population. The totals can
+// still differ at the margin — the series drops a bin landing on the window's
+// exclusive end that Insights' inclusive EndTime handed to this query, and this
+// query is the one subject to the row cap below — but never because the two are
+// counting different requests.
+//
+// No limit clause, which is not the same as no limit. Insights caps every
+// result set at InsightsMaxRows, so the `sort n desc` below still decides what
+// survives once (status, path) cardinality passes 10,000 — and it decides by
+// volume, meaning a flood of 404s against random paths eventually pushes a rare
+// 403 row out. That is the failure this ordering was meant to avoid and it is
+// only postponed, not removed: there is no single Insights scan that both
+// enumerates paths and keeps a correct per-code total past the row cap. What
+// the missing `limit N` does buy is the ordinary case, where every code is seen
+// and the cut to a readable number of paths happens in Go, per status code,
+// after all of them have been. When the cap is reached the caller says so —
+// see warnIfTruncated and the byPath total's basis in panels_logs.go.
+//
+// Dropping bin() is what makes an uncapped stats affordable at all: one row per
+// (status, path) rather than one per (bucket, status, path).
+// The window is not a parameter: without bin() nothing here varies with it, and
+// the runner scopes every query to the window when it starts it.
+func (q LogQueries) PodBadStatusByPath() (Query, error) {
 	status, err := q.processedField(q.Format.StatusField)
 	if err != nil {
 		return Query{}, fmt.Errorf("statusField: %w", err)
@@ -171,9 +230,12 @@ func (q LogQueries) PodBadStatusSeries(w Window) (Query, error) {
 	b.WriteString(ns)
 	b.WriteString(probes)
 	fmt.Fprintf(&b, "| filter ispresent(%s) and %s\n", status, notInStatuses(status, q.Format.OKStatuses))
-	fmt.Fprintf(&b, "| stats count() as n by bin(%s) as t, %s as status, %s as path\n", w.Period, status, path)
-	b.WriteString("| sort t asc")
-	return Query{ID: "pod.badStatus.series", Text: b.String()}, nil
+	// max(@timestamp) rather than a sort: the caller wants the newest hit per
+	// group, and Insights renders @timestamp fixed-width so the comparison that
+	// picks it needs no parse.
+	fmt.Fprintf(&b, "| stats count() as n, max(@timestamp) as lastTs by %s as status, %s as path\n", status, path)
+	b.WriteString("| sort n desc")
+	return Query{ID: "pod.badStatus.byPath", Text: b.String()}, nil
 }
 
 // PodBadStatusList returns the most recent non-OK responses, newest first.
@@ -296,7 +358,17 @@ func (q LogQueries) levelFilter() (string, error) {
 }
 
 func (q LogQueries) accessFields() ([]string, error) {
-	out := []string{"kubernetes.pod_name as pod"}
+	// The three fixed ones come from the Kubernetes envelope, not from the
+	// application's own log line, so they are present whatever an operator has
+	// or has not named in the log format. That is what lets the panel offer a
+	// row detail unconditionally instead of only where a User-Agent field
+	// happens to be configured. PodErrorList already selects `container` under
+	// this name.
+	out := []string{
+		"kubernetes.pod_name as pod",
+		"kubernetes.container_name as container",
+		"kubernetes.namespace_name as namespace",
+	}
 	for _, spec := range []struct {
 		name, alias string
 	}{

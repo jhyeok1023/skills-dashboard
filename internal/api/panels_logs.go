@@ -199,6 +199,22 @@ func noteQueryErrors(panel *domain.Panel, src logSource, errs map[string]error) 
 	}
 }
 
+// warnIfTruncated says so when Logs Insights cut an aggregate at its result
+// ceiling.
+//
+// An aggregate that hit the ceiling is not a smaller answer, it is a wrong one:
+// the rows Insights kept are whatever the query happened to order first, so
+// every total derived from them is short by an unknown amount. Nothing read
+// this flag before, which is how a truncated stats could be summed into a
+// headline number and drawn as a chart with nothing on screen to say it had
+// stopped counting.
+func warnIfTruncated(panel *domain.Panel, id string, results map[string]awsx.QueryResult) {
+	if res, ok := results[id]; ok && res.Truncated {
+		panel.Warn("%s 집계가 Logs Insights 결과 상한(%d행)에 걸려 잘렸습니다. 값이 실제보다 작습니다 — 조회 구간을 좁히거나 네임스페이스·제외 경로를 설정하세요.",
+			id, awsx.InsightsMaxRows)
+	}
+}
+
 func (s *Service) buildPodLatencyPanel(rc requestCtx) (*domain.Panel, error) {
 	panel := &domain.Panel{ID: "pod-latency", Title: "팟 응답 시간"}
 	q := domain.LogQueries{Format: rc.cfg.LogFormat}
@@ -319,6 +335,7 @@ func (s *Service) buildPodStatusCodePanel(rc requestCtx) (*domain.Panel, error) 
 	src := s.podLogs(rc)
 	results, errs := s.runLogQueries(rc, src, "pod-status-codes", []domain.Query{series, list})
 	noteQueryErrors(panel, src, errs)
+	warnIfTruncated(panel, series.ID, results)
 
 	// The aggregate is uncapped, so summing it gives the real number of
 	// non-OK responses. The list beside it is capped. Counting the list would
@@ -370,6 +387,8 @@ func (s *Service) buildPodStatusCodePanel(rc requestCtx) (*domain.Panel, error) 
 				"timestamp": r["@timestamp"],
 				"app":       r["app"],
 				"pod":       r["pod"],
+				"container": r["container"],
+				"namespace": r["namespace"],
 				"method":    r["method"],
 				"path":      r["path"],
 				"status":    r["status"],
@@ -389,10 +408,19 @@ func (s *Service) buildPodStatusCodePanel(rc requestCtx) (*domain.Panel, error) 
 		{Key: "app", Label: "앱", Copyable: true},
 		{Key: "pod", Label: "팟", Mono: true, Copyable: true},
 		{Key: "clientIp", Label: "클라이언트 IP", Mono: true, Copyable: true},
+		// Unconditional, because these two come from the Kubernetes envelope
+		// rather than from the application's log line: they are there whatever
+		// the operator has configured, so they can never open a detail view that
+		// reads "—". Declaring them is also what gives the panel a row detail at
+		// all — the frontend offers the expander wherever a detail column
+		// exists, and the expanded view then shows every column, so an operator
+		// looking at one 404 gets the whole request unclipped in one place.
+		{Key: "container", Label: "컨테이너", Detail: true, Mono: true, Copyable: true},
+		{Key: "namespace", Label: "네임스페이스", Detail: true, Mono: true, Copyable: true},
 	}
-	// Declared only when the query actually selected it. An always-present
-	// column would open a detail view whose one row reads "—" on every cluster
-	// that has not named the field.
+	// Declared only when the query actually selected it. This one *is*
+	// operator-configured, and an always-present column would put a "—" in the
+	// detail of every cluster that has not named the field.
 	if rc.cfg.LogFormat.UserAgentField != "" {
 		cols = append(cols, domain.Column{
 			Key: "userAgent", Label: "User-Agent", Detail: true, Mono: true, Copyable: true,
@@ -410,6 +438,199 @@ func (s *Service) buildPodStatusCodePanel(rc requestCtx) (*domain.Panel, error) 
 		Basis: "상태 코드가 " + strings.Join(okList, ", ") + " 가 아닌 요청 (집계 전체)" +
 			excludedPaths(rc.cfg.LogFormat),
 		Intent: domain.IntentBad,
+	})
+	noteQueryCost(panel, results)
+	return panel, nil
+}
+
+// statusBucket is one status code with the paths that produced it.
+type statusBucket struct {
+	code   string
+	total  float64
+	lastTs string
+	paths  []pathCount
+}
+
+type pathCount struct {
+	path string
+	n    float64
+}
+
+// pivotStatusPaths folds (status, path) rows into one bucket per status code,
+// busiest first, with each bucket's paths busiest first too.
+//
+// The same shape as pivotWAFActions and for the same reason: the query groups
+// by both keys in one scan, and the fold that turns that into "one row per code,
+// its paths underneath" is cheaper to do here than as a second query over the
+// same bytes.
+func pivotStatusPaths(rows []map[string]string) []statusBucket {
+	index := map[string]int{}
+	var out []statusBucket
+
+	for _, r := range rows {
+		code := r["status"]
+		if code == "" {
+			code = "(none)"
+		}
+		n, ok := rowFloat(r, "n")
+		if !ok {
+			continue
+		}
+		i, seen := index[code]
+		if !seen {
+			i = len(out)
+			index[code] = i
+			out = append(out, statusBucket{code: code})
+		}
+		b := &out[i]
+		b.total += n
+		// A row with no path still counts toward the code's total — dropping it
+		// would make the breakdown disagree with the chart — but it has no name
+		// to list, so it is not offered as a path.
+		if p := r["path"]; p != "" {
+			b.paths = append(b.paths, pathCount{path: p, n: n})
+		}
+		// Fixed-width @timestamp, so lexical order is chronological order.
+		if ts := r["lastTs"]; ts > b.lastTs {
+			b.lastTs = ts
+		}
+	}
+
+	for i := range out {
+		p := out[i].paths
+		sort.SliceStable(p, func(a, b int) bool {
+			if p[a].n != p[b].n {
+				return p[a].n > p[b].n
+			}
+			return p[a].path < p[b].path
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].total != out[j].total {
+			return out[i].total > out[j].total
+		}
+		return out[i].code < out[j].code
+	})
+	return out
+}
+
+// topPathsNote renders a bucket's paths for the row's expanded detail, and says
+// how many it left out.
+//
+// One string rather than a nested table: the detail view is a definition list of
+// this row's own values, and a code's paths are exactly that — one value that
+// happens to be a list. Cutting silently at topN would read as "these are the
+// paths", which for a 404 flood is the opposite of true.
+func topPathsNote(b statusBucket, topN int) string {
+	if len(b.paths) == 0 {
+		return "경로가 기록되지 않았습니다"
+	}
+	shown := b.paths
+	if topN > 0 && len(shown) > topN {
+		shown = shown[:topN]
+	}
+	parts := make([]string, 0, len(shown)+1)
+	for _, p := range shown {
+		parts = append(parts, fmt.Sprintf("%s (%s건)", p.path, strconv.FormatFloat(p.n, 'f', -1, 64)))
+	}
+	if rest := len(b.paths) - len(shown); rest > 0 {
+		parts = append(parts, fmt.Sprintf("외 %d개", rest))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// buildPodStatusBreakdownPanel answers "which paths made up the 404s, and which
+// made up the 403s" — one row per status code, its paths in the row's detail.
+//
+// It is a panel of its own rather than a second table on pod-status-codes
+// because a panel carries one table, and the two are different kinds of thing:
+// that one lists individual requests, this one aggregates them. Keeping it off
+// the overview page is deliberate — a per-code path breakdown is a thing an
+// operator goes looking for, and putting it there would add an Insights scan to
+// the screen that loads most often.
+func (s *Service) buildPodStatusBreakdownPanel(rc requestCtx) (*domain.Panel, error) {
+	panel := &domain.Panel{ID: "pod-status-breakdown", Title: "응답 코드별 경로"}
+	q := domain.LogQueries{Format: rc.cfg.LogFormat}
+	topN := rc.cfg.Limits.TopN
+
+	// A path field is not optional here the way it is elsewhere — this panel is
+	// the breakdown *by path*, so without one there is nothing for it to say.
+	// Said as a warning rather than an error: every other pod panel degrades in
+	// this configuration instead of failing, and returning an error here would
+	// turn the whole pod-logs page into a failure card and this panel's own
+	// endpoint into a 502. Skipping the query also saves the scan.
+	if rc.cfg.LogFormat.PathField == "" {
+		panel.Warn("경로 필드(pathField)가 설정되지 않아 코드별 경로를 집계할 수 없습니다.")
+		return panel, nil
+	}
+
+	byPath, err := q.PodBadStatusByPath()
+	if err != nil {
+		return nil, err
+	}
+
+	src := s.podLogs(rc)
+	results, errs := s.runLogQueries(rc, src, "pod-status-breakdown", []domain.Query{byPath})
+	noteQueryErrors(panel, src, errs)
+	warnIfTruncated(panel, byPath.ID, results)
+
+	var rows []domain.Row
+	var total float64
+	if res, ok := results[byPath.ID]; ok {
+		for _, b := range pivotStatusPaths(res.Rows) {
+			total += b.total
+			rows = append(rows, domain.Row{
+				"status": b.code,
+				"count":  b.total,
+				"paths":  float64(len(b.paths)),
+				// `timestamp`, not a name of its own: the frontend routes a cell
+				// through the log-timestamp formatter by that key, so any other
+				// name renders the raw UTC string beside columns that show local
+				// time.
+				"timestamp": b.lastTs,
+				"topPaths":  topPathsNote(b, topN),
+			})
+		}
+	}
+
+	// The total is the row count, not the request count: this table lists status
+	// codes, and every code the query saw is on it. Nothing is capped away at
+	// this level — the cap inside a row, on its path list, is stated by
+	// topPathsNote, and the one above the query is stated by warnIfTruncated.
+	panel.Table = domain.NewTable([]domain.Column{
+		{Key: "status", Label: "코드", Mono: true, Copyable: true},
+		{Key: "count", Label: "건수", Numeric: true},
+		{Key: "paths", Label: "경로 종류", Numeric: true},
+		{Key: "timestamp", Label: "마지막 발생", Mono: true},
+		{Key: "topPaths", Label: "상위 경로", Detail: true, Mono: true, Copyable: true},
+	}, rows, int64(len(rows)), topN)
+
+	// Two renderings of the same rows, so the bars cannot count something the
+	// table does not.
+	panel.Bars = &domain.Bars{KeyColumn: "status", ValueColumn: "count"}
+
+	// Both of these are floors rather than counts once the query hit the row cap:
+	// the rows Insights dropped were the lowest-count (status, path) pairs, so a
+	// code that only ever appeared in them is missing from the tally and its
+	// requests are missing from the sum. Saying "이상" in the basis is the whole
+	// fix available here — the number cannot be recovered without a second scan.
+	codesBasis := "구간 내 관측된 비정상 응답 코드"
+	totalBasis := "코드 · 경로별 집계 합계 (전체)"
+	if res, ok := results[byPath.ID]; ok && res.Truncated {
+		codesBasis += " (결과 상한에 걸려 실제보다 적을 수 있음)"
+		totalBasis = "코드 · 경로별 집계 합계 (결과 상한에 걸려 실제 이상)"
+	}
+
+	panel.Stats = append(panel.Stats, domain.Stat{
+		Key: "pod.badStatus.codes", Label: "코드 종류", Unit: domain.UnitCount,
+		Value: domain.P(float64(len(rows))),
+		Basis: codesBasis + excludedPaths(rc.cfg.LogFormat),
+	}, domain.Stat{
+		Key: "pod.badStatus.byPath.total", Label: "비정상 응답", Unit: domain.UnitCount,
+		Value: domain.P(total),
+		Basis: totalBasis + excludedPaths(rc.cfg.LogFormat),
+		// No intent: the same number is already tagged bad on pod-status-codes,
+		// and a second alarm tile for one fact puts two cards in the red for it.
 	})
 	noteQueryCost(panel, results)
 	return panel, nil
