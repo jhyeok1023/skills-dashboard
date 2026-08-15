@@ -28,6 +28,10 @@ export const LONG_POD = 'product-api-deployment-7d9f8c6b5a-x2m4q-with-a-very-lon
 export const LONG_ARN =
 	'arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/k8s-default-product-d6d507c878/73e2d6bc24d8a067';
 export const LONG_PATH = '/v1/organizations/12345/members?include=profile,settings&sort=-createdAt';
+// The reason a User-Agent is a detail rather than a column: it is longer than
+// every other value on the row put together.
+export const LONG_USER_AGENT =
+	'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 
 const window = {
 	start: START,
@@ -327,7 +331,12 @@ const wafTrafficPanel = {
 			{ key: 'args', label: '쿼리', mono: true, copyable: true },
 			{ key: 'clientIp', label: '클라이언트', mono: true, copyable: true },
 			{ key: 'country', label: '국가' },
-			{ key: 'rule', label: '룰', copyable: true }
+			{ key: 'rule', label: '룰', copyable: true },
+			// Detail only: what an operator asks after "it was blocked", none of
+			// it short enough to earn a column.
+			{ key: 'ruleType', label: '룰 종류', detail: true },
+			{ key: 'userAgent', label: 'User-Agent', detail: true, mono: true, copyable: true },
+			{ key: 'responseCode', label: '응답 코드', detail: true }
 		],
 		rows: Array.from({ length: 300 }, (_, i) => ({
 			timestamp: '2026-08-10 07:12:04.000',
@@ -337,7 +346,13 @@ const wafTrafficPanel = {
 			args: LONG_PATH.split('?')[1] ?? '',
 			clientIp: '203.0.113.42',
 			country: 'KR',
-			rule: i % 5 === 0 ? 'AWS-AWSManagedRulesSQLiRuleSet' : ''
+			rule: i % 5 === 0 ? 'AWS-AWSManagedRulesSQLiRuleSet' : '',
+			ruleType: i % 5 === 0 ? 'MANAGED_RULE_GROUP' : '',
+			userAgent: LONG_USER_AGENT,
+			responseCode:
+				i % 5 === 0
+					? '403 · WAF 기본 차단 응답 (로그에 코드가 기록되지 않음)'
+					: 'WAF 로그에 없음 · 애플리케이션 응답 코드는 팟 로그에서 확인하세요'
 		})),
 		total: 17000,
 		truncated: true,

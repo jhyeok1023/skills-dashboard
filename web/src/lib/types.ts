@@ -42,6 +42,14 @@ export interface Column {
 	copyable?: boolean;
 	mono?: boolean;
 	numeric?: boolean;
+	/**
+	 * Shown only in a row's expanded detail, never as a column.
+	 *
+	 * It also decides which tables offer an expander at all: a table that
+	 * declares none has nothing to reveal, so an aggregate row — already its own
+	 * summary — stays inert without the view knowing any panel by name.
+	 */
+	detail?: boolean;
 }
 
 export type Row = Record<string, unknown>;
@@ -135,6 +143,8 @@ export interface LogFormat {
 	pathField: string;
 	levelField: string;
 	clientIpField: string;
+	/** Empty unless the operator names it; an access log has one only if the application wrote it. */
+	userAgentField: string;
 	textPattern: string;
 	levelPattern: string;
 	namespace: string;

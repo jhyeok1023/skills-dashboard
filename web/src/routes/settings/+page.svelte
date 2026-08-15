@@ -462,7 +462,7 @@ AWS_REGION=ap-northeast-2</pre>
 				</p>
 
 				<div class="fields">
-					{#each [['appField', '앱'], ['latencyField', '응답 시간'], ['statusField', '상태 코드'], ['methodField', '메소드'], ['pathField', '경로'], ['levelField', '레벨'], ['clientIpField', '클라이언트 IP']] as [key, label] (key)}
+					{#each [['appField', '앱'], ['latencyField', '응답 시간'], ['statusField', '상태 코드'], ['methodField', '메소드'], ['pathField', '경로'], ['levelField', '레벨'], ['clientIpField', '클라이언트 IP'], ['userAgentField', 'User-Agent']] as [key, label] (key)}
 						<div class="field">
 							<label for={key}>{label} 필드</label>
 							<input

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -388,6 +389,31 @@ func TestPodBadStatusListSelectsTheCopyableColumns(t *testing.T) {
 	}
 }
 
+// An access log carries a User-Agent only if the application wrote one, so the
+// field is named by the operator or not selected at all. Selecting it
+// unconditionally would open a detail view whose one row reads "—" on every
+// cluster that has not configured it.
+func TestPodBadStatusListSelectsAUserAgentOnlyWhenOneIsConfigured(t *testing.T) {
+	off := LogQueries{Format: DefaultLogFormat()}
+	got, err := off.PodBadStatusList(testWindow(t), 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got.Text, "userAgent") {
+		t.Errorf("an unconfigured User-Agent was queried anyway:\n%s", got.Text)
+	}
+
+	f := DefaultLogFormat()
+	f.UserAgentField = "user_agent"
+	got, err = LogQueries{Format: f}.PodBadStatusList(testWindow(t), 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.Text, "log_processed.user_agent as userAgent") {
+		t.Errorf("a configured User-Agent was not selected:\n%s", got.Text)
+	}
+}
+
 func TestPodErrorQueriesCoverBothLevels(t *testing.T) {
 	q := LogQueries{Format: DefaultLogFormat()}
 	w := testWindow(t)
@@ -449,6 +475,73 @@ func TestWAFQueries(t *testing.T) {
 	// "nothing arrived", and those are the two answers it exists to separate.
 	if strings.Contains(list.Text, "filter action") {
 		t.Errorf("recent list is filtered to one action:\n%s", list.Text)
+	}
+}
+
+// The row detail can only show what the row was given, and these are the fields
+// that answer what an operator asks after "it was blocked": by what kind of
+// rule, from what client calling itself what, and what the WAF sent back.
+func TestWAFRecentListCarriesTheDetailFields(t *testing.T) {
+	list := WAFQueries{Headers: DefaultWAFHeaders()}.RecentList(300)
+	for _, want := range []string{
+		`parse @message /"name":"(?i)User-Agent","value":"(?<uaCapture>[^"]*)"/`,
+		"uaCapture as userAgent",
+		"terminatingRuleType as ruleType",
+		"responseCodeSent as responseCode",
+		"httpRequest.uri as uri",
+		"httpRequest.args as args",
+	} {
+		if !strings.Contains(list.Text, want) {
+			t.Errorf("recent list is missing %q:\n%s", want, list.Text)
+		}
+	}
+}
+
+// The detail exists so an operator does not have to open the console. It does
+// not exist to ship the console's payload: a WAF record is roughly a kilobyte
+// once its header array and rule-group lists are counted, against a couple of
+// hundred bytes for the named fields, and this list is refetched on every poll.
+// Selecting @message costs the same scan and multiplies what crosses the wire,
+// which is exactly why it looks like a free improvement to someone later.
+// captureRe finds the ephemeral fields a query's parse commands define.
+var captureRe = regexp.MustCompile(`\(\?P?<([A-Za-z_][A-Za-z0-9_]*)>`)
+
+// Logs Insights reads a name in `fields` as a definition, not a selection, so a
+// query that lists its own parse capture there defines it twice and is rejected
+// before it runs — MalformedQueryException, "Ephemeral field is already
+// defined". A capture may be used and may be aliased into a new name; it may
+// not be named again.
+//
+// This is the rule that has now bitten three separate queries, so it gets a
+// test that reads the query rather than a comment asking the next person to
+// remember.
+func TestWAFRecentListAliasesItsParseCaptureRatherThanListingIt(t *testing.T) {
+	list := WAFQueries{Headers: DefaultWAFHeaders()}.RecentList(300)
+	captures := captureRe.FindAllStringSubmatch(list.Text, -1)
+	if len(captures) == 0 {
+		t.Fatalf("no parse capture at all, so the User-Agent cannot arrive:\n%s", list.Text)
+	}
+	for _, c := range captures {
+		name := c[1]
+		for _, listed := range []string{", " + name + "\n", ", " + name + ",", " " + name + ",\n"} {
+			if strings.Contains(list.Text, listed) {
+				t.Errorf("parse capture %q is also listed in fields, which Insights rejects:\n%s",
+					name, list.Text)
+			}
+		}
+		// Aliased, or it never becomes a column and the detail shows nothing.
+		if !strings.Contains(list.Text, name+" as ") {
+			t.Errorf("parse capture %q never reaches a column:\n%s", name, list.Text)
+		}
+	}
+}
+
+func TestWAFRecentListDoesNotSelectTheRawRecord(t *testing.T) {
+	list := WAFQueries{Headers: DefaultWAFHeaders()}.RecentList(300)
+	for _, banned := range []string{"fields @message", ", @message", "@message,"} {
+		if strings.Contains(list.Text, banned) {
+			t.Errorf("recent list selects the raw record via %q:\n%s", banned, list.Text)
+		}
 	}
 }
 

@@ -102,6 +102,28 @@
 		});
 	});
 
+	/**
+	 * The columns that get a column. Anything marked `detail` is on the wire for
+	 * one row's expanded view and would only crowd the header out here.
+	 *
+	 * `prepared` above still walks every column, deliberately: a detail value is
+	 * formatted once per payload like any other, and lands in `search`. So the
+	 * filter box finds a row by its User-Agent even though no column shows one.
+	 */
+	const cols = $derived(table.columns.filter((c) => !c.detail));
+	const hasDetail = $derived(table.columns.length > cols.length);
+
+	/**
+	 * Which row is open, keyed by its content.
+	 *
+	 * Not by index and not by object identity: sorting reorders the rows under
+	 * the operator, and every poll rebuilds `prepared` from a fresh payload. An
+	 * index would leave the detail attached to whatever row later took that
+	 * position, and an object reference would collapse the panel on every
+	 * refresh. Content survives both.
+	 */
+	let openKey = $state<string | null>(null);
+
 	const filtered = $derived.by(() => {
 		const q = query.trim().toLowerCase();
 		if (!q) return prepared;
@@ -132,6 +154,16 @@
 
 	const visible = $derived(sorted.slice(0, shown));
 	const remaining = $derived(sorted.length - visible.length);
+
+	// findIndex, not a filter: a log table can hold many byte-identical rows,
+	// and opening one must not open all of them.
+	const openIndex = $derived(
+		openKey === null ? -1 : visible.findIndex((r) => r.search === openKey)
+	);
+
+	function toggle(row: Prepared) {
+		openKey = openKey === row.search ? null : row.search;
+	}
 
 	function toggleSort(key: string) {
 		if (sortKey === key) {
@@ -190,7 +222,10 @@
 			<table>
 				<thead>
 					<tr>
-						{#each table.columns as col (col.key)}
+						{#if hasDetail}
+							<th class="expander" aria-label="상세"></th>
+						{/if}
+						{#each cols as col (col.key)}
 							<th class:numeric={col.numeric} aria-sort={ariaSort(col.key)}>
 								<button type="button" class="sort" onclick={() => toggleSort(col.key)}>
 									<span data-value>{col.label}</span>
@@ -204,8 +239,34 @@
 				</thead>
 				<tbody>
 					{#each visible as row, i (i)}
-						<tr>
-							{#each table.columns as col (col.key)}
+						<!--
+							The row is clickable for the mouse; the button inside it is the
+							keyboard and screen-reader path, and carries aria-expanded. The
+							guard is what stops a press of the copy button inside a cell from
+							also toggling the row under it.
+						-->
+						<tr
+							class:open={i === openIndex}
+							onclick={hasDetail
+								? (e) => {
+										if (!(e.target as HTMLElement).closest('button, a, input')) toggle(row);
+									}
+								: undefined}
+						>
+							{#if hasDetail}
+								<td class="expander">
+									<button
+										type="button"
+										class="reveal"
+										aria-expanded={i === openIndex}
+										onclick={() => toggle(row)}
+									>
+										<span aria-hidden="true">{i === openIndex ? '▾' : '▸'}</span>
+										<span class="tiny">상세</span>
+									</button>
+								</td>
+							{/if}
+							{#each cols as col (col.key)}
 								<td class:numeric={col.numeric} class:mono={col.mono}>
 									{#if row.actions[col.key]}
 										<!-- Colour never carries the action alone: the glyph beside it
@@ -227,6 +288,44 @@
 								</td>
 							{/each}
 						</tr>
+						{#if i === openIndex}
+							<!--
+								Rendered only while open, never rendered-and-hidden. A panel is
+								shown twice — in its card and in its expand dialog — and the two
+								are asserted to hold the same number of rows, which a detail row
+								sitting in the DOM under `display: none` would quietly break.
+
+								Every column, not just the detail ones: an operator who opened a
+								row wants that request in one place, not half of it here and the
+								other half back up in the table.
+							-->
+							<tr class="detail">
+								<td colspan={cols.length + 1}>
+									<dl>
+										{#each table.columns as col (col.key)}
+											<dt data-value>{col.label}</dt>
+											<dd class:mono={col.mono}>
+												{#if row.actions[col.key]}
+													<span class="action" data-value style:color={row.actions[col.key]?.color}>
+														<span aria-hidden="true">{row.actions[col.key]?.icon}</span>
+														{row.display[col.key]}
+													</span>
+												{:else if col.copyable && row.raw[col.key]}
+													<CopyValue
+														value={row.display[col.key]}
+														copy={String(row.raw[col.key])}
+														mono={col.mono}
+														label={col.label}
+													/>
+												{:else}
+													<span data-value>{row.display[col.key]}</span>
+												{/if}
+											</dd>
+										{/each}
+									</dl>
+								</td>
+							</tr>
+						{/if}
 					{/each}
 				</tbody>
 			</table>
@@ -290,5 +389,59 @@
 		align-items: baseline;
 		gap: 4px;
 		font-weight: 600;
+	}
+
+	th.expander,
+	td.expander {
+		width: 1%;
+	}
+
+	.reveal {
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		padding: 1px 4px;
+		border: 0;
+		border-radius: var(--radius-control);
+		background: none;
+		color: var(--label-tertiary);
+		cursor: pointer;
+	}
+
+	.reveal:hover,
+	tr.open .reveal {
+		background: var(--fill-secondary);
+		color: var(--label-secondary);
+	}
+
+	tr.open {
+		background: var(--fill-secondary);
+	}
+
+	.detail > td {
+		background: var(--bg-secondary);
+	}
+
+	/* auto-fit, so a narrow panel stacks the pairs and a wide one lays them out
+	   in columns. The same detail has to be readable in a card and in the
+	   expand dialog, which are very different widths. */
+	.detail dl {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(22rem, 100%), 1fr));
+		gap: 2px 16px;
+		margin: 0;
+		padding: 6px 2px;
+	}
+
+	.detail dt {
+		color: var(--label-tertiary);
+		font-size: 0.85em;
+	}
+
+	/* Wraps rather than clips: a User-Agent is the whole reason this exists, and
+	   a truncated one answers nothing. */
+	.detail dd {
+		margin: 0 0 6px;
+		overflow-wrap: anywhere;
 	}
 </style>

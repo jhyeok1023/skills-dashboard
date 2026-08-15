@@ -375,11 +375,12 @@ func (s *Service) buildPodStatusCodePanel(rc requestCtx) (*domain.Panel, error) 
 				"status":    r["status"],
 				"latencyMs": r["latencyMs"],
 				"clientIp":  r["clientIp"],
+				"userAgent": r["userAgent"],
 			})
 		}
 	}
 
-	panel.Table = domain.NewTable([]domain.Column{
+	cols := []domain.Column{
 		{Key: "timestamp", Label: "시각", Mono: true},
 		{Key: "status", Label: "코드", Numeric: true, Copyable: true},
 		{Key: "method", Label: "메소드"},
@@ -388,7 +389,16 @@ func (s *Service) buildPodStatusCodePanel(rc requestCtx) (*domain.Panel, error) 
 		{Key: "app", Label: "앱", Copyable: true},
 		{Key: "pod", Label: "팟", Mono: true, Copyable: true},
 		{Key: "clientIp", Label: "클라이언트 IP", Mono: true, Copyable: true},
-	}, rows, honestTotal(total, len(rows)), limit)
+	}
+	// Declared only when the query actually selected it. An always-present
+	// column would open a detail view whose one row reads "—" on every cluster
+	// that has not named the field.
+	if rc.cfg.LogFormat.UserAgentField != "" {
+		cols = append(cols, domain.Column{
+			Key: "userAgent", Label: "User-Agent", Detail: true, Mono: true, Copyable: true,
+		})
+	}
+	panel.Table = domain.NewTable(cols, rows, honestTotal(total, len(rows)), limit)
 
 	okList := make([]string, 0, len(rc.cfg.LogFormat.OKStatuses))
 	for _, c := range rc.cfg.LogFormat.OKStatuses {
@@ -581,14 +591,17 @@ func (s *Service) buildWAFTrafficPanel(rc requestCtx) (*domain.Panel, error) {
 	if res, ok := results[recent.ID]; ok {
 		for _, r := range res.Rows {
 			rows = append(rows, domain.Row{
-				"timestamp": r["@timestamp"],
-				"action":    r["action"],
-				"rule":      r["rule"],
-				"clientIp":  r["clientIp"],
-				"country":   r["country"],
-				"method":    r["method"],
-				"uri":       r["uri"],
-				"args":      r["args"],
+				"timestamp":    r["@timestamp"],
+				"action":       r["action"],
+				"rule":         r["rule"],
+				"clientIp":     r["clientIp"],
+				"country":      r["country"],
+				"method":       r["method"],
+				"uri":          r["uri"],
+				"args":         r["args"],
+				"ruleType":     r["ruleType"],
+				"userAgent":    r["userAgent"],
+				"responseCode": wafResponseNote(r["action"], r["responseCode"]),
 			})
 		}
 	}
@@ -608,10 +621,40 @@ func (s *Service) buildWAFTrafficPanel(rc requestCtx) (*domain.Panel, error) {
 		{Key: "clientIp", Label: "클라이언트", Mono: true, Copyable: true},
 		{Key: "country", Label: "국가"},
 		{Key: "rule", Label: "룰", Copyable: true},
+		// Detail only. A rule type is a word an operator wants once, about one
+		// row; a User-Agent is too long to give a column without squeezing
+		// every other one; and the response note is a sentence.
+		{Key: "ruleType", Label: "룰 종류", Detail: true},
+		{Key: "userAgent", Label: "User-Agent", Detail: true, Mono: true, Copyable: true},
+		{Key: "responseCode", Label: "응답 코드", Detail: true},
 	}, rows, honestTotal(overall, len(rows)), limit)
 
 	noteQueryCost(panel, results)
 	return panel, nil
+}
+
+// wafResponseNote says what response a request got, and says so in words
+// because for most rows there is no number to give.
+//
+// A WAF log does not carry the application's status code. responseCodeSent is
+// written only when a Block action has a custom response configured; a plain
+// block answers 403 and records nothing about it; and whatever the WAF allowed
+// was answered by the application, which only the pod logs saw. A "상태 코드"
+// column here would therefore print a number that no record supports for every
+// row but one kind — so the column is a sentence, and the sentence says which
+// case this row is and where the rest of the answer lives.
+func wafResponseNote(action, sent string) string {
+	if sent != "" {
+		return sent + " (WAF 사용자 지정 응답)"
+	}
+	switch strings.ToUpper(strings.TrimSpace(action)) {
+	case "BLOCK":
+		return "403 · WAF 기본 차단 응답 (로그에 코드가 기록되지 않음)"
+	case "CAPTCHA", "CHALLENGE":
+		return "WAF가 CAPTCHA · Challenge 응답을 보냈습니다 (코드는 로그에 없음)"
+	default:
+		return "WAF 로그에 없음 · 애플리케이션 응답 코드는 팟 로그에서 확인하세요"
+	}
 }
 
 // wafActionColor fixes one colour per WAF action, for every panel that shows

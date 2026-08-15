@@ -129,12 +129,17 @@ func classify(q string) string {
 		return "errorList"
 	case strings.Contains(q, "as t, action"):
 		return "wafAction"
+	// The per-request lists come first, exactly as badStatusList and errorList
+	// do above. RecentList selects a method, a uri and an args of its own, so
+	// every breakdown case below would claim it first and hand the WAF traffic
+	// panel a breakdown's rows — which is what used to happen, silently,
+	// because the wafMethod fixture also carries an ALLOW and a BLOCK.
+	case strings.Contains(q, "terminatingRuleId as rule") && strings.Contains(q, "sort @timestamp desc"):
+		return "wafRecentList"
 	case strings.Contains(q, "httpMethod as method"):
 		return "wafMethod"
 	case strings.Contains(q, "uri as uri, httpRequest.args"):
 		return "wafPath"
-	case strings.Contains(q, "terminatingRuleId as rule") && strings.Contains(q, "sort @timestamp desc"):
-		return "wafRecentList"
 	case strings.Contains(q, "terminatingRuleId as rule"):
 		return "wafBlocked"
 	case strings.Contains(q, "parse @message"):
@@ -259,9 +264,12 @@ func rowsFor(kind string) [][]logtypes.ResultField {
 			{f("rule", "xss"), f("clientIp", "5.6.7.8"), f("country", "US"), f("n", "40")},
 		}
 	case "wafRecentList":
+		// No responseCode on either row on purpose: a custom response is the
+		// rare case, and the common one — a block that records no code at all —
+		// is what the panel has to answer for without inventing a number.
 		return [][]logtypes.ResultField{
-			{f("@timestamp", "2026-08-10 09:41:00.000"), f("action", "BLOCK"), f("rule", "sqli"), f("clientIp", "1.2.3.4"), f("country", "KR"), f("method", "GET"), f("uri", "/v1/user"), f("args", "email=a@b.c")},
-			{f("@timestamp", "2026-08-10 09:40:00.000"), f("action", "ALLOW"), f("rule", ""), f("clientIp", "9.9.9.9"), f("country", "JP"), f("method", "GET"), f("uri", "/healthcheck"), f("args", "")},
+			{f("@timestamp", "2026-08-10 09:41:00.000"), f("action", "BLOCK"), f("rule", "sqli"), f("ruleType", "MANAGED_RULE_GROUP"), f("clientIp", "1.2.3.4"), f("country", "KR"), f("method", "GET"), f("uri", "/v1/user"), f("args", "email=a@b.c"), f("userAgent", "curl/8.4.0")},
+			{f("@timestamp", "2026-08-10 09:40:00.000"), f("action", "ALLOW"), f("rule", ""), f("ruleType", ""), f("clientIp", "9.9.9.9"), f("country", "JP"), f("method", "GET"), f("uri", "/healthcheck"), f("args", ""), f("userAgent", "kube-probe/1.29")},
 		}
 	case "wafHeader":
 		return [][]logtypes.ResultField{
@@ -893,6 +901,56 @@ func TestWAFTrafficListsIndividualRequestsWithTheirAction(t *testing.T) {
 	// Bars over individual requests would draw a chart of bars all one high.
 	if panel.Bars != nil {
 		t.Errorf("the request list was turned into a distribution: %+v", panel.Bars)
+	}
+}
+
+// A WAF log does not carry the application's response code. responseCodeSent is
+// written only for a block with a custom response; a plain block answers 403
+// and records nothing; and anything allowed was answered by the application,
+// which only the pod logs saw. So the panel says which case each row is instead
+// of printing a number no record supports — and this is the test that fails
+// when someone later "fixes" the missing status column.
+func TestWAFDetailDoesNotInventAResponseCode(t *testing.T) {
+	_, h := newTestService(t)
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/waf-traffic?range=1h&period=5m")), "waf-traffic")
+
+	for _, c := range panel.Table.Columns {
+		if c.Key == "status" {
+			t.Errorf("the WAF table claims a status column: %+v", c)
+		}
+	}
+
+	notes := map[string]string{}
+	for _, r := range panel.Table.Rows {
+		notes[fmt.Sprint(r["action"])] = fmt.Sprint(r["responseCode"])
+	}
+	if got := notes["BLOCK"]; !strings.Contains(got, "403") || !strings.Contains(got, "기록되지 않음") {
+		t.Errorf("a plain block does not say 403 is the default and unrecorded: %q", got)
+	}
+	if got := notes["ALLOW"]; !strings.Contains(got, "팟 로그") {
+		t.Errorf("an allowed request does not point at where its code actually lives: %q", got)
+	}
+}
+
+// The expander is offered wherever a table declares a detail column, and
+// nowhere else. An aggregate row is already its own summary, so unfolding it
+// would repeat back what is on screen — and the view decides this from the
+// payload alone, never from a panel's name.
+func TestOnlyPerRequestTablesDeclareDetailColumns(t *testing.T) {
+	_, h := newTestService(t)
+	for panelID, wantDetail := range map[string]bool{
+		"waf-traffic":   true,
+		"waf-blocked":   false,
+		"waf-breakdown": false,
+	} {
+		panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/"+panelID+"?range=1h&period=5m")), panelID)
+		got := false
+		for _, c := range panel.Table.Columns {
+			got = got || c.Detail
+		}
+		if got != wantDetail {
+			t.Errorf("%s has detail columns = %v, want %v", panelID, got, wantDetail)
+		}
 	}
 }
 

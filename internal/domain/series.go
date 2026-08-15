@@ -200,6 +200,16 @@ type Column struct {
 	Copyable bool   `json:"copyable,omitempty"`
 	Mono     bool   `json:"mono,omitempty"`
 	Numeric  bool   `json:"numeric,omitempty"`
+	// Detail keeps a value out of the table and in the row's expanded detail
+	// only. It is for what cannot earn a column — a User-Agent, a sentence
+	// about what a response code does and does not say — but still describes
+	// one specific row and so has to travel with it.
+	//
+	// It is also what decides which tables offer a detail view at all: the
+	// frontend shows the expander only where a table declares one of these, so
+	// an aggregate table whose row is already its own summary is left alone
+	// without the view needing to know any panel's name.
+	Detail bool `json:"detail,omitempty"`
 }
 
 // Row is one table row keyed by Column.Key.

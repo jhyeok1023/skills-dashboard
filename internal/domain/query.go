@@ -306,6 +306,7 @@ func (q LogQueries) accessFields() ([]string, error) {
 		{q.Format.StatusField, "status"},
 		{q.Format.LatencyField, "latencyMs"},
 		{q.Format.ClientIPField, "clientIp"},
+		{q.Format.UserAgentField, "userAgent"},
 	} {
 		if spec.name == "" {
 			continue
@@ -411,10 +412,37 @@ func (q WAFQueries) Blocked(limit int) Query {
 // traffic arriving at all, and is it getting through — which a list of blocks
 // alone cannot, because an empty one means either "nothing was blocked" or
 // "nothing arrived".
+//
+// Beyond what the table shows, it selects what an operator asks next about one
+// row: which client sent it, calling itself what, and what the WAF actually
+// did about it. Those are extra fields on a scan that already happened, so they
+// cost nothing — Insights bills for bytes read, and the record was read whole
+// either way.
+//
+// What it does not select is @message. The raw WAF record is roughly a
+// kilobyte with its header array and rule-group lists, against a couple of
+// hundred bytes for the fields below, and this list is refetched on every poll.
+// Naming the fields is what keeps a detail view from becoming a download.
 func (q WAFQueries) RecentList(limit int) Query {
+	// The capture is named apart from the column it feeds, and aliased into it
+	// below.
+	//
+	// Logs Insights reads a name in `fields` as a definition rather than a
+	// selection, so listing the parse's own field there defines it twice and the
+	// query is rejected before it runs: "Ephemeral field is already defined".
+	// It is the same rule that stops the pod error list from re-aliasing the
+	// message field it already selected — a query may use an ephemeral field
+	// freely, and may alias it into a new name, but may not name it again.
+	//
+	// The header name is a constant, so the error is impossible and dropping it
+	// keeps this signature free of one that no caller could act on.
+	ua, _ := headerParse("User-Agent", "uaCapture")
 	return Query{
 		ID: "waf.recent.list",
-		Text: "fields @timestamp, action, terminatingRuleId as rule, httpRequest.clientIp as clientIp,\n" +
+		Text: ua + "\n" +
+			"| fields @timestamp, action, terminatingRuleId as rule, terminatingRuleType as ruleType,\n" +
+			"       responseCodeSent as responseCode, uaCapture as userAgent,\n" +
+			"       httpRequest.clientIp as clientIp,\n" +
 			"       httpRequest.country as country, httpRequest.httpMethod as method,\n" +
 			"       httpRequest.uri as uri, httpRequest.args as args\n" +
 			"| sort @timestamp desc\n" +
@@ -428,7 +456,8 @@ func (q WAFQueries) RecentList(limit int) Query {
 // without escaping surprises.
 var headerNameRe = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+.^_` + "`" + `|~-]+$`)
 
-// ByHeader counts the distinct values of one request header, per action.
+// headerParse renders the command that lifts one request header out of a WAF
+// record and binds it to alias.
 //
 // WAF stores headers as an array of {name, value} objects. Logs Insights cannot
 // group by an array element, and indexing by position (headers.0.value) is
@@ -436,14 +465,27 @@ var headerNameRe = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+.^_` + "`" + `|~-]+$`)
 // of the raw record with a parse. The reference implementation solved the same
 // problem with a SQLite json_each cross join over every stored row, which is
 // the single most expensive query it ran.
-func (q WAFQueries) ByHeader(name string, limit int) (Query, error) {
+//
+// Both the per-header breakdown and the recent-request list need this, and they
+// need it to behave identically — one shape of regex to reason about when a
+// header stops coming through.
+func headerParse(name, alias string) (string, error) {
 	if !headerNameRe.MatchString(name) {
-		return Query{}, fmt.Errorf("invalid header name %q", name)
+		return "", fmt.Errorf("invalid header name %q", name)
 	}
-	pattern := fmt.Sprintf(`"name":"(?i)%s","value":"(?<headerValue>[^"]*)"`, regexp.QuoteMeta(name))
+	return fmt.Sprintf(`parse @message /"name":"(?i)%s","value":"(?<%s>[^"]*)"/`,
+		regexp.QuoteMeta(name), alias), nil
+}
+
+// ByHeader counts the distinct values of one request header, per action.
+func (q WAFQueries) ByHeader(name string, limit int) (Query, error) {
+	parse, err := headerParse(name, "headerValue")
+	if err != nil {
+		return Query{}, err
+	}
 	return Query{
 		ID: "waf.byHeader." + strings.ToLower(name),
-		Text: fmt.Sprintf("parse @message /%s/\n", pattern) +
+		Text: parse + "\n" +
 			"| filter ispresent(headerValue)\n" +
 			"| " + breakdownStats("headerValue as value") +
 			fmt.Sprintf("| limit %d", limit),
