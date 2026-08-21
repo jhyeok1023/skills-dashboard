@@ -262,8 +262,7 @@ func TestErrorQueriesUseOnlyLogsInsightsSyntax(t *testing.T) {
 		if !strings.Contains(got.Text, "if(isWarn, 'warn', 'error') as level") {
 			t.Errorf("%s does not derive level with if():\n%s", name, got.Text)
 		}
-		// (?i) inside a regex literal is the only legitimate '?'.
-		if strings.Contains(strings.ReplaceAll(got.Text, "(?i)", ""), "?") {
+		if strings.Contains(withoutRegexLiterals(got.Text), "?") {
 			t.Errorf("%s carries a '?' outside a regex literal:\n%s", name, got.Text)
 		}
 		if !strings.Contains(got.Text, "tolower(rawLevel)") {
@@ -271,11 +270,15 @@ func TestErrorQueriesUseOnlyLogsInsightsSyntax(t *testing.T) {
 		}
 	}
 
-	// PodErrorList selects the message field by name, and Logs Insights will
-	// not compile a query that also re-aliases it.
+	// PodErrorList selects the message by the one name accessPreamble gives it,
+	// and Logs Insights will not compile a query that also re-aliases it. The
+	// alias, not the raw field: the preamble coalesces the configured field with
+	// @message so a Gin line still has text to show, and a list that reached
+	// past that to `log` would print nothing for a record fluent-bit did not
+	// decode.
 	msg := DefaultLogFormat().MessageField
-	if !strings.Contains(list.Text, ", "+msg+",") {
-		t.Fatalf("list query no longer selects %q, so the message column would be empty:\n%s", msg, list.Text)
+	if !strings.Contains(list.Text, ", dashboardMessage,") {
+		t.Fatalf("list query no longer selects the message, so the column would be empty:\n%s", list.Text)
 	}
 	for name, got := range map[string]Query{
 		"errors.series": series,
@@ -285,6 +288,26 @@ func TestErrorQueriesUseOnlyLogsInsightsSyntax(t *testing.T) {
 			t.Errorf("%s re-aliases the selected message field:\n%s", name, got.Text)
 		}
 	}
+}
+
+// withoutRegexLiterals drops the /.../ literals a query carries so the rest can
+// be checked for syntax Logs Insights rejects.
+//
+// The check this serves is for a ternary — `a ? b : c`, which the Insights
+// lexer refuses — and it used to be "no '?' anywhere except (?i)". Then the Gin
+// access-line pattern arrived, and it is built almost entirely out of `(?:`,
+// `(?<name>` and `)?`. Every one of those is inside a regex literal, where a
+// '?' is not syntax the lexer ever sees, so the literals come out first and the
+// original question is asked of what is left.
+func withoutRegexLiterals(query string) string {
+	var kept []string
+	for _, line := range strings.Split(query, "\n") {
+		if i := strings.Index(line, "/"); i >= 0 && strings.LastIndex(line, "/") > i {
+			line = line[:i] + line[strings.LastIndex(line, "/")+1:]
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
 }
 
 // The list and the aggregate beside it must exclude identically, or the header
@@ -377,22 +400,17 @@ func TestPodBadStatusListSelectsTheCopyableColumns(t *testing.T) {
 	}
 	for _, want := range []string{
 		"kubernetes.pod_name as pod",
-<<<<<<< HEAD
-		"coalesce(log_processed.path, ginTarget) as requestTarget",
-		"coalesce(log_processed.status, ginStatusNumber) as status",
-		"coalesce(jsonLatencyMs, ginLatencyMs) as latencyMs",
-		"coalesce(log_processed.client_ip, ginClientIp) as clientIp",
-=======
 		// From the Kubernetes envelope, so present whatever the operator
 		// configured. They are what lets the panel offer a row detail on a
 		// fresh install instead of only where a User-Agent field was named.
 		"kubernetes.container_name as container",
 		"kubernetes.namespace_name as namespace",
-		"log_processed.path as path",
-		"log_processed.status as status",
-		"log_processed.latency_ms as latencyMs",
-		"log_processed.client_ip as clientIp",
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
+		// Defined once by accessPreamble, so the copied row reads the same
+		// names whether the line arrived as JSON or as a Gin access line.
+		"coalesce(log_processed.path, ginTarget) as requestTarget",
+		"coalesce(log_processed.status, ginStatusNumber) as status",
+		"coalesce(jsonLatencyMs, ginLatencyMs) as latencyMs",
+		"coalesce(log_processed.client_ip, ginClientIp) as clientIp",
 		"sort @timestamp desc",
 	} {
 		if !strings.Contains(got.Text, want) {
@@ -401,7 +419,6 @@ func TestPodBadStatusListSelectsTheCopyableColumns(t *testing.T) {
 	}
 }
 
-<<<<<<< HEAD
 func TestAutoPresetBuildsGinAndJSONAliases(t *testing.T) {
 	q := LogQueries{Format: DefaultLogFormat()}
 	got, err := q.PodTraffic(testWindow(t))
@@ -449,7 +466,9 @@ func TestPresetRestrictsInsightsParsing(t *testing.T) {
 	}
 	if strings.Contains(jsonQuery.Text, "ginStatus") || strings.Contains(jsonQuery.Text, "parse dashboardMessage") {
 		t.Errorf("JSON preset still parses Gin fields:\n%s", jsonQuery.Text)
-=======
+	}
+}
+
 // The series query decides whether the "비정상 응답" count is honest, and what
 // decides that is how many rows it asks for: Insights cuts a stats result at
 // InsightsMaxRows and reports nothing about having done so. Grouped by bucket
@@ -457,16 +476,20 @@ func TestPresetRestrictsInsightsParsing(t *testing.T) {
 // which it used to be for no reader at all, it is bounded by whatever a scanner
 // decides to request, and around eighty distinct paths was enough to truncate a
 // two-hour window silently.
+//
+// The stats clause is named in full rather than searched for "as path": the
+// preamble defines a `path` alias for every query now, so a substring test
+// would report a grouping that is not there.
 func TestPodBadStatusSeriesGroupsOnlyByWhatItPlots(t *testing.T) {
 	q := LogQueries{Format: DefaultLogFormat()}
 	got, err := q.PodBadStatusSeries(testWindow(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(got.Text, "as path") {
+	if strings.Contains(got.Text, "as t, status, path") {
 		t.Errorf("the series groups by path, which nothing plots and which uncaps its row count:\n%s", got.Text)
 	}
-	if !strings.Contains(got.Text, "as t, log_processed.status as status\n") {
+	if !strings.Contains(got.Text, "| stats count() as n by bin(5m) as t, status\n") {
 		t.Errorf("the series no longer groups by bucket and status:\n%s", got.Text)
 	}
 }
@@ -493,8 +516,8 @@ func TestPodBadStatusByPathMatchesTheOtherTwoQueries(t *testing.T) {
 	// requests by two similar-looking filters is the failure this prevents.
 	for _, want := range []string{
 		"| filter kubernetes.namespace_name = 'prod'\n",
-		"| filter not ispresent(log_processed.path) or log_processed.path not in ['/health']\n",
-		"| filter ispresent(log_processed.status) and log_processed.status not in [200, 201]\n",
+		"| filter not ispresent(path) or path not in ['/health']\n",
+		"| filter ispresent(status) and status not in [200, 201]\n",
 	} {
 		if !strings.Contains(byPath.Text, want) || !strings.Contains(series.Text, want) {
 			t.Errorf("filter %q is not shared by both queries:\nbyPath:\n%s\nseries:\n%s",
@@ -502,7 +525,7 @@ func TestPodBadStatusByPathMatchesTheOtherTwoQueries(t *testing.T) {
 		}
 	}
 
-	if !strings.Contains(byPath.Text, "stats count() as n, max(@timestamp) as lastTs by log_processed.status as status, log_processed.path as path\n") {
+	if !strings.Contains(byPath.Text, "| stats count() as n, max(@timestamp) as lastTs by status, path\n") {
 		t.Errorf("byPath does not group by status and path with a last-seen:\n%s", byPath.Text)
 	}
 	// No bin(), or the row count goes back to buckets × statuses × paths and
@@ -517,15 +540,18 @@ func TestPodBadStatusByPathMatchesTheOtherTwoQueries(t *testing.T) {
 	if strings.Contains(byPath.Text, "| limit") || byPath.Limit != 0 {
 		t.Errorf("byPath caps itself server-side, which drops whole status codes:\n%s", byPath.Text)
 	}
-	if strings.Contains(byPath.Text, "@message") {
-		t.Errorf("byPath selects the raw record:\n%s", byPath.Text)
-	}
+	// There used to be an assertion that byPath never names @message. It no
+	// longer says anything: accessPreamble coalesces the configured message
+	// field with @message so a Gin line still has text to parse, so every
+	// access query mentions it by construction.
 }
 
 // An access log carries a User-Agent only if the application wrote one, so the
 // field is named by the operator or not selected at all. Selecting it
 // unconditionally would open a detail view whose one row reads "—" on every
-// cluster that has not configured it.
+// cluster that has not configured it — and Gin's default access line has no
+// User-Agent to read at any configuration, so naming the field there buys
+// nothing either.
 func TestPodBadStatusListSelectsAUserAgentOnlyWhenOneIsConfigured(t *testing.T) {
 	off := LogQueries{Format: DefaultLogFormat()}
 	got, err := off.PodBadStatusList(testWindow(t), 300)
@@ -544,7 +570,15 @@ func TestPodBadStatusListSelectsAUserAgentOnlyWhenOneIsConfigured(t *testing.T) 
 	}
 	if !strings.Contains(got.Text, "log_processed.user_agent as userAgent") {
 		t.Errorf("a configured User-Agent was not selected:\n%s", got.Text)
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
+	}
+
+	f.Preset = LogPresetGin
+	got, err = LogQueries{Format: f}.PodBadStatusList(testWindow(t), 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got.Text, "userAgent") {
+		t.Errorf("the Gin preset queried a User-Agent it cannot parse:\n%s", got.Text)
 	}
 }
 

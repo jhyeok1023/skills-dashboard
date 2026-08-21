@@ -421,10 +421,12 @@ func (s *Service) buildPodStatusCodePanel(rc requestCtx) (*domain.Panel, error) 
 		{Key: "container", Label: "컨테이너", Detail: true, Mono: true, Copyable: true},
 		{Key: "namespace", Label: "네임스페이스", Detail: true, Mono: true, Copyable: true},
 	}
-	// Declared only when the query actually selected it. This one *is*
-	// operator-configured, and an always-present column would put a "—" in the
-	// detail of every cluster that has not named the field.
-	if rc.cfg.LogFormat.UserAgentField != "" {
+	// Declared only when the query actually selected it — HasUserAgent is the
+	// same test accessFields makes, so the column and the projection can never
+	// disagree. This one *is* operator-configured, and an always-present column
+	// would put a "—" in the detail of every cluster that has not named the
+	// field or whose preset cannot parse one.
+	if rc.cfg.LogFormat.HasUserAgent() {
 		cols = append(cols, domain.Column{
 			Key: "userAgent", Label: "User-Agent", Detail: true, Mono: true, Copyable: true,
 		})

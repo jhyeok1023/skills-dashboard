@@ -156,6 +156,17 @@ func (f *LogFormat) Validate() error {
 	return f.Compile()
 }
 
+// HasUserAgent reports whether a User-Agent is worth querying: the operator has
+// named the field, and the preset can actually produce one. Gin's default
+// access line carries no User-Agent at all — there is no capture group for it
+// in ginInsightsPattern because there is nothing in the line to capture — so
+// under that preset the column would read "—" on every row. Both the query
+// builder and the panel read this, so the two can never disagree about whether
+// the column exists.
+func (f LogFormat) HasUserAgent() bool {
+	return f.UserAgentField != "" && f.Preset != LogPresetGin
+}
+
 // LogLine is one parsed record. Latency is normalised to milliseconds here so
 // that no consumer downstream has to know what unit the source used.
 type LogLine struct {

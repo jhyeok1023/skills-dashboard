@@ -10,11 +10,8 @@ import (
 	"net/http"
 	"regexp"
 	"runtime/debug"
-<<<<<<< HEAD
 	"strings"
-=======
 	"sync"
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 	"time"
 
 	"github.com/jhyeok1023/skills-dashboard/internal/awsx"
@@ -388,24 +385,20 @@ func (s *Service) handlePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-<<<<<<< HEAD
 	cfg, err := s.requestConfig(r)
 	if err != nil {
 		badRequest(w, err)
 		return
 	}
-	rc := requestCtx{ctx: r.Context(), w: win, cfg: cfg}
-	builders := s.panelBuilders()
-	payload := domain.NewPayload(win)
 
-	// Panels are built sequentially against a shared cache; the expensive work
-	// underneath is already concurrent, and a failing panel must not blank the
-	// ones beside it.
-	for _, pid := range ids {
-		if rc.ctx.Err() != nil {
-			return
-		}
-=======
+	// A client that has already gone away is not worth a wave of paid Insights
+	// scans. This reads the request's own context, not the budgeted one below:
+	// the budget expiring is a different event, and the whole point of it is
+	// that the page still answers with the panels that did finish.
+	if r.Context().Err() != nil {
+		return
+	}
+
 	// A page sits on a wave of Logs Insights queries and can outlast the
 	// server's own WriteTimeout — at which point Go closes the connection
 	// mid-response and the browser reports a transport failure, blanking the
@@ -419,7 +412,7 @@ func (s *Service) handlePage(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), pageBudget)
 	defer cancel()
 
-	rc := requestCtx{ctx: ctx, w: win, cfg: s.Store.Get()}
+	rc := requestCtx{ctx: ctx, w: win, cfg: cfg}
 	payload := domain.NewPayload(win)
 
 	// Payload.Add is a bare append, so it stays on this goroutine.
@@ -462,27 +455,16 @@ func (s *Service) buildPanels(rc requestCtx, page string, ids []string, builders
 	results := make([]*domain.Panel, len(ids))
 	var wg sync.WaitGroup
 	for i, pid := range ids {
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
+		// Stop handing out new work once the budget is spent or the client is
+		// gone. The panels already in flight are left to finish and land in
+		// their slots — they are what the caller renders instead of nothing.
+		if rc.ctx.Err() != nil {
+			break
+		}
 		build, ok := builders[pid]
 		if !ok {
 			continue
 		}
-<<<<<<< HEAD
-		panel, err := build(rc)
-		if err != nil {
-			if rc.ctx.Err() != nil {
-				return
-			}
-			s.log().Warn("panel failed", "panel", pid, "error", err)
-			payload.Add(&domain.Panel{
-				ID:       pid,
-				Title:    pid,
-				Warnings: []string{err.Error()},
-			})
-			continue
-		}
-		payload.Add(panel)
-=======
 		wg.Add(1)
 		go func(i int, pid string, build panelBuilder) {
 			defer wg.Done()
@@ -525,7 +507,6 @@ func warnPanel(id string, err error) *domain.Panel {
 		ID:       id,
 		Title:    id,
 		Warnings: []string{err.Error()},
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 	}
 }
 
