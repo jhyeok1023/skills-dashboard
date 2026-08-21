@@ -204,6 +204,23 @@ func coalesceExpr(values ...string) string {
 	return "coalesce(" + strings.Join(kept, ", ") + ")"
 }
 
+// hasAccessField reports whether accessPreamble can put a real value in one of
+// its aliases: either the operator named a JSON field this preset will read, or
+// the Gin pattern captures one.
+//
+// This exists because coalesceExpr collapses to `”` when neither side has
+// anything to offer, and `”` is a value. `ispresent(”)` is true, so a filter
+// meant to select the lines that carried a status instead selects every line in
+// the log group, and the 비정상 응답 count reports the whole log group as
+// failures. A query that cannot be answered has to say so instead — the caller
+// turns the error into a panel warning naming the unset field.
+func (q LogQueries) hasAccessField(jsonField string, ginCaptures bool) bool {
+	if q.Format.Preset != LogPresetGin && jsonField != "" {
+		return true
+	}
+	return ginCaptures && q.Format.Preset != LogPresetJSON
+}
+
 func aliasExpr(expr, alias string) string {
 	return expr + " as " + alias
 }
@@ -217,6 +234,15 @@ func aliasExpr(expr, alias string) string {
 // "요청 수" in the UI, which is why the same panel could show two totals. Here
 // the difference is explicit on the wire and reported as each stat's basis.
 func (q LogQueries) PodTraffic(w Window) (Query, error) {
+	// Only the populations that exist are counted. A stat built over an alias
+	// the preset cannot fill would count every line in the log group, which is
+	// the one number worse than a missing one.
+	hasStatus := q.hasAccessField(q.Format.StatusField, true)
+	hasLatency := q.hasAccessField(q.Format.LatencyField, true)
+	if !hasStatus && !hasLatency {
+		return Query{}, fmt.Errorf("statusField, latencyField: neither is configured")
+	}
+
 	preamble, err := q.accessPreamble()
 	if err != nil {
 		return Query{}, err
@@ -234,13 +260,23 @@ func (q LogQueries) PodTraffic(w Window) (Query, error) {
 	b.WriteString(preamble)
 	b.WriteString(ns)
 	b.WriteString(probes)
-	b.WriteString("| filter ispresent(status) or ispresent(latencyMs)\n")
-	b.WriteString("| stats count(status) as requests,\n")
-	b.WriteString("        count(latencyMs) as latencySamples,\n")
-	b.WriteString("        avg(latencyMs) as avg,\n")
-	b.WriteString("        pct(latencyMs, 50) as p50,\n")
-	b.WriteString("        pct(latencyMs, 90) as p90,\n")
-	b.WriteString("        pct(latencyMs, 99) as p99\n")
+	var present, stats []string
+	if hasStatus {
+		present = append(present, "ispresent(status)")
+		stats = append(stats, "count(status) as requests")
+	}
+	if hasLatency {
+		present = append(present, "ispresent(latencyMs)")
+		stats = append(stats,
+			"count(latencyMs) as latencySamples",
+			"avg(latencyMs) as avg",
+			"pct(latencyMs, 50) as p50",
+			"pct(latencyMs, 90) as p90",
+			"pct(latencyMs, 99) as p99",
+		)
+	}
+	fmt.Fprintf(&b, "| filter %s\n", strings.Join(present, " or "))
+	fmt.Fprintf(&b, "| stats %s\n", strings.Join(stats, ",\n        "))
 	fmt.Fprintf(&b, "    by bin(%s) as t, app\n", w.Period)
 	b.WriteString("| sort t asc")
 	return Query{ID: "pod.traffic", Text: b.String()}, nil
@@ -259,6 +295,9 @@ func (q LogQueries) PodTraffic(w Window) (Query, error) {
 // chart and the "비정상 응답" count beside it, silently. The per-path breakdown
 // now has its own unbinned query, where the same paths cost one row each.
 func (q LogQueries) PodBadStatusSeries(w Window) (Query, error) {
+	if !q.hasAccessField(q.Format.StatusField, true) {
+		return Query{}, fmt.Errorf("statusField: field is not configured")
+	}
 	preamble, err := q.accessPreamble()
 	if err != nil {
 		return Query{}, err
@@ -309,6 +348,12 @@ func (q LogQueries) PodBadStatusSeries(w Window) (Query, error) {
 // The window is not a parameter: without bin() nothing here varies with it, and
 // the runner scopes every query to the window when it starts it.
 func (q LogQueries) PodBadStatusByPath() (Query, error) {
+	if !q.hasAccessField(q.Format.StatusField, true) {
+		return Query{}, fmt.Errorf("statusField: field is not configured")
+	}
+	if !q.hasAccessField(q.Format.PathField, true) {
+		return Query{}, fmt.Errorf("pathField: field is not configured")
+	}
 	preamble, err := q.accessPreamble()
 	if err != nil {
 		return Query{}, err
@@ -339,6 +384,9 @@ func (q LogQueries) PodBadStatusByPath() (Query, error) {
 // The filter is identical to PodBadStatusSeries so the list and the count it is
 // displayed beside can never describe different populations.
 func (q LogQueries) PodBadStatusList(w Window, limit int) (Query, error) {
+	if !q.hasAccessField(q.Format.StatusField, true) {
+		return Query{}, fmt.Errorf("statusField: field is not configured")
+	}
 	preamble, err := q.accessPreamble()
 	if err != nil {
 		return Query{}, err

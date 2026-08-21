@@ -455,12 +455,6 @@ func (s *Service) buildPanels(rc requestCtx, page string, ids []string, builders
 	results := make([]*domain.Panel, len(ids))
 	var wg sync.WaitGroup
 	for i, pid := range ids {
-		// Stop handing out new work once the budget is spent or the client is
-		// gone. The panels already in flight are left to finish and land in
-		// their slots — they are what the caller renders instead of nothing.
-		if rc.ctx.Err() != nil {
-			break
-		}
 		build, ok := builders[pid]
 		if !ok {
 			continue

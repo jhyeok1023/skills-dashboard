@@ -299,15 +299,164 @@ func TestErrorQueriesUseOnlyLogsInsightsSyntax(t *testing.T) {
 // `(?<name>` and `)?`. Every one of those is inside a regex literal, where a
 // '?' is not syntax the lexer ever sees, so the literals come out first and the
 // original question is asked of what is left.
+//
+// Which '/' opens a literal has to be decided rather than guessed at: the
+// latency arithmetic divides twice on one line and the probe filter quotes two
+// absolute paths, so "from the first slash to the last" would eat real query
+// text — including, in the one line most likely to grow a ternary, the `case()`
+// this test exists to police.
 func withoutRegexLiterals(query string) string {
-	var kept []string
-	for _, line := range strings.Split(query, "\n") {
-		if i := strings.Index(line, "/"); i >= 0 && strings.LastIndex(line, "/") > i {
-			line = line[:i] + line[strings.LastIndex(line, "/")+1:]
+	var out strings.Builder
+	for i := 0; i < len(query); i++ {
+		if query[i] != '/' || !opensRegexLiteral(query[:i]) {
+			out.WriteByte(query[i])
+			continue
 		}
-		kept = append(kept, line)
+		// Consume to the closing delimiter. `\/` is an escaped slash inside the
+		// pattern — the Gin one escapes the date separators — and does not end
+		// it.
+		for i++; i < len(query); i++ {
+			if query[i] == '\\' {
+				i++
+				continue
+			}
+			if query[i] == '/' {
+				break
+			}
+		}
 	}
-	return strings.Join(kept, "\n")
+	return out.String()
+}
+
+// opensRegexLiteral reports whether a '/' at the end of the given text starts a
+// regex literal rather than being a division operator. In these queries a
+// literal only ever follows `like ` or the field argument of `| parse `.
+func opensRegexLiteral(before string) bool {
+	line := before
+	if i := strings.LastIndexByte(before, '\n'); i >= 0 {
+		line = before[i+1:]
+	}
+	if !strings.HasSuffix(line, " ") {
+		return false
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	if fields[len(fields)-1] == "like" {
+		return true
+	}
+	// `| parse <field> /re/`: two words before the delimiter, the first the
+	// pipe-prefixed verb.
+	return len(fields) >= 3 && fields[len(fields)-3] == "|" && fields[len(fields)-2] == "parse"
+}
+
+// The helper above decides what a syntax check gets to see, so a mistake in it
+// is a mistake in every assertion built on it — silently, and in the direction
+// of passing.
+func TestWithoutRegexLiteralsKeepsEverythingOutsideALiteral(t *testing.T) {
+	for name, tc := range map[string]struct{ in, want string }{
+		"division is not a delimiter": {
+			in:   "| fields case(ginLatencyUnit = 's', ginLatency * 1000, ginLatency / 1000, ginLatency / 1000000) as ms",
+			want: "| fields case(ginLatencyUnit = 's', ginLatency * 1000, ginLatency / 1000, ginLatency / 1000000) as ms",
+		},
+		"quoted absolute paths survive": {
+			in:   "| filter not ispresent(path) or path not in ['/health', '/healthcheck']",
+			want: "| filter not ispresent(path) or path not in ['/health', '/healthcheck']",
+		},
+		"a parse pattern is removed whole": {
+			in:   `| parse dashboardMessage /\[GIN\]\s+\d{4}\/\d{2}\/\d{2}\s+(?<ginStatus>\d{3})/`,
+			want: "| parse dashboardMessage ",
+		},
+		"a like pattern is removed whole": {
+			in:   `    or (lvl = '' and dashboardMessage like /(?i)\b(warn|warning)\b/)`,
+			want: "    or (lvl = '' and dashboardMessage like )",
+		},
+		"a ternary outside a literal is still visible": {
+			in:   "| fields case(ispresent(x), a ? b : c) as y",
+			want: "| fields case(ispresent(x), a ? b : c) as y",
+		},
+	} {
+		if got := withoutRegexLiterals(tc.in); got != tc.want {
+			t.Errorf("%s:\n got %q\nwant %q", name, got, tc.want)
+		}
+	}
+}
+
+// The access aliases collapse to `”` when neither the preset's parser nor a
+// configured JSON field can fill them, and `ispresent(”)` is true — so a
+// filter meant to pick out the lines that carried a status picks out every line
+// in the log group, and the panel beside it reports the whole log group as
+// failures. Nothing requires statusField, so clearing the input in the settings
+// page is all it takes to get there.
+func TestAccessQueriesRefuseAnAliasNoPresetCanFill(t *testing.T) {
+	f := DefaultLogFormat()
+	f.Preset = LogPresetJSON
+	f.StatusField = ""
+	q := LogQueries{Format: f}
+
+	if got, err := q.PodBadStatusSeries(testWindow(t)); err == nil {
+		t.Errorf("the series was built without a status to filter on:\n%s", got.Text)
+	}
+	if got, err := q.PodBadStatusByPath(); err == nil {
+		t.Errorf("the breakdown was built without a status to filter on:\n%s", got.Text)
+	}
+	if got, err := q.PodBadStatusList(testWindow(t), 300); err == nil {
+		t.Errorf("the list was built without a status to filter on:\n%s", got.Text)
+	}
+
+	f.PathField = ""
+	f.StatusField = "status"
+	if got, err := (LogQueries{Format: f}).PodBadStatusByPath(); err == nil {
+		t.Errorf("the breakdown grouped by a path no preset can fill:\n%s", got.Text)
+	}
+}
+
+// The other direction, which is what keeps the guard above from being a way to
+// break Gin: the Gin pattern captures a status itself, so a cluster that runs
+// Gin and names no JSON fields at all still gets its panels.
+func TestAccessQueriesAcceptWhatTheGinPatternCaptures(t *testing.T) {
+	for _, preset := range []LogPreset{LogPresetAuto, LogPresetGin} {
+		f := DefaultLogFormat()
+		f.Preset = preset
+		f.StatusField, f.PathField, f.LatencyField = "", "", ""
+		q := LogQueries{Format: f}
+
+		if _, err := q.PodBadStatusSeries(testWindow(t)); err != nil {
+			t.Errorf("preset %q: series refused a status the Gin pattern captures: %v", preset, err)
+		}
+		if _, err := q.PodBadStatusByPath(); err != nil {
+			t.Errorf("preset %q: breakdown refused fields the Gin pattern captures: %v", preset, err)
+		}
+		if _, err := q.PodTraffic(testWindow(t)); err != nil {
+			t.Errorf("preset %q: traffic refused fields the Gin pattern captures: %v", preset, err)
+		}
+	}
+}
+
+// PodTraffic counts two populations and names them apart. A population the
+// preset cannot see is left out of the query rather than counted as everything:
+// the panel reads each stat by name, so a missing column is a missing number,
+// which is the honest answer.
+func TestPodTrafficCountsOnlyThePopulationsItCanSee(t *testing.T) {
+	f := DefaultLogFormat()
+	f.Preset = LogPresetJSON
+	f.StatusField = ""
+	got, err := (LogQueries{Format: f}).PodTraffic(testWindow(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got.Text, "ispresent(status)") || strings.Contains(got.Text, "count(status)") {
+		t.Errorf("traffic counted a status no preset can fill:\n%s", got.Text)
+	}
+	if !strings.Contains(got.Text, "| filter ispresent(latencyMs)\n") {
+		t.Errorf("traffic dropped the population it can still see:\n%s", got.Text)
+	}
+
+	f.LatencyField = ""
+	if got, err := (LogQueries{Format: f}).PodTraffic(testWindow(t)); err == nil {
+		t.Errorf("traffic was built with no access field at all:\n%s", got.Text)
+	}
 }
 
 // The list and the aggregate beside it must exclude identically, or the header
