@@ -73,12 +73,15 @@ func DefaultLimits() Limits {
 // which have to be discovered or typed in.
 func Default() Config {
 	return Config{
-		Region:     "ap-northeast-2",
-		WAFRegion:  "us-east-1",
-		Namespace:  "default",
-		WAFHeaders: domain.DefaultWAFHeaders(),
-		LogFormat:  domain.DefaultLogFormat(),
-		Limits:     DefaultLimits(),
+		Region:       "ap-northeast-2",
+		WAFRegion:    "us-east-1",
+		Namespace:    "default",
+		TargetGroups: []string{},
+		RDSProxies:   []string{},
+		WebACLs:      []string{},
+		WAFHeaders:   domain.DefaultWAFHeaders(),
+		LogFormat:    domain.DefaultLogFormat(),
+		Limits:       DefaultLimits(),
 	}
 }
 
@@ -199,6 +202,15 @@ func (c *Config) inspect() []problem {
 // converted. Nothing here can fail — a conversion that does not produce a
 // usable value is reported by inspect instead.
 func (c *Config) fillDefaults() {
+	if c.TargetGroups == nil {
+		c.TargetGroups = []string{}
+	}
+	if c.RDSProxies == nil {
+		c.RDSProxies = []string{}
+	}
+	if c.WebACLs == nil {
+		c.WebACLs = []string{}
+	}
 	if c.WAFRegion == "" {
 		c.WAFRegion = "us-east-1"
 	}
@@ -298,6 +310,13 @@ func NewStore(path string) (*Store, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
+	var storedShape struct {
+		LogFormat struct {
+			Preset *domain.LogPreset `json:"preset"`
+		} `json:"logFormat"`
+	}
+	hasLogPreset := json.Unmarshal(b, &storedShape) == nil && storedShape.LogFormat.Preset != nil
+
 	cfg := Default()
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		s.notices = append(s.notices,
@@ -308,6 +327,11 @@ func NewStore(path string) (*Store, error) {
 			s.notices = append(s.notices, "원본은 "+bak+" 에 두었습니다.")
 		}
 		return s, nil
+	}
+	if !hasLogPreset {
+		cfg.LogFormat = domain.DefaultLogFormat()
+		s.notices = append(s.notices,
+			"기존 로그 파싱 규칙 → 지우고 Gin·JSON 자동 인식값을 적용했습니다.")
 	}
 	s.notices = append(s.notices, cfg.Repair()...)
 	s.cfg = cfg
@@ -374,9 +398,9 @@ func save(path string, cfg Config) error {
 
 func (c Config) clone() Config {
 	out := c
-	out.TargetGroups = append([]string(nil), c.TargetGroups...)
-	out.RDSProxies = append([]string(nil), c.RDSProxies...)
-	out.WebACLs = append([]string(nil), c.WebACLs...)
+	out.TargetGroups = append([]string{}, c.TargetGroups...)
+	out.RDSProxies = append([]string{}, c.RDSProxies...)
+	out.WebACLs = append([]string{}, c.WebACLs...)
 	out.WAFHeaders = append([]string(nil), c.WAFHeaders...)
 	out.LogFormat.OKStatuses = append([]int(nil), c.LogFormat.OKStatuses...)
 	out.LogFormat.ExcludePaths = append([]string(nil), c.LogFormat.ExcludePaths...)

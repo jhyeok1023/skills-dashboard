@@ -85,3 +85,37 @@ describe('discover', () => {
 		expect(res.partial).toHaveLength(1);
 	});
 });
+
+describe('page filters', () => {
+	it('sends the selected namespace with the page request', async () => {
+		respondWith({ window: {}, panels: [] });
+
+		await api.page('pod-logs', '1h', '5m', undefined, 'payments');
+
+		const fetchMock = vi.mocked(fetch);
+		const requested = new URL(String(fetchMock.mock.calls[0]?.[0]), 'http://localhost');
+		expect(requested.pathname).toBe('/api/page/pod-logs');
+		expect(requested.searchParams.get('namespace')).toBe('payments');
+	});
+});
+
+describe('config', () => {
+	it('normalizes legacy null selections into arrays', async () => {
+		respondWith({
+			targetGroups: null,
+			rdsProxies: null,
+			webAcls: null,
+			wafHeaders: null,
+			logFormat: { okStatuses: null, excludePaths: null }
+		});
+
+		const config = await api.config();
+
+		expect(config.targetGroups).toEqual([]);
+		expect(config.rdsProxies).toEqual([]);
+		expect(config.webAcls).toEqual([]);
+		expect(config.wafHeaders).toEqual([]);
+		expect(config.logFormat.okStatuses).toEqual([]);
+		expect(config.logFormat.excludePaths).toEqual([]);
+	});
+});

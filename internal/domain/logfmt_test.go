@@ -124,6 +124,81 @@ func TestParseFallsBackToDecodingTheInnerLineItself(t *testing.T) {
 	}
 }
 
+func TestParseGinAccessLine(t *testing.T) {
+	f := DefaultLogFormat()
+	raw := `{"time":"2026-08-21T02:00:00Z","stream":"stdout","log":"[GIN] 2026/08/21 - 11:00:00 | 404 | 1.25ms | 10.0.4.18 | GET \"/v1/user?id=7\"","kubernetes":{"pod_name":"user-77b8","namespace_name":"skills","container_name":"user"}}`
+	line, err := f.Parse(raw, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line.App != "user" || line.Pod != "user-77b8" || line.Namespace != "skills" {
+		t.Errorf("Kubernetes identity was not retained: %+v", line)
+	}
+	if line.Method != "GET" || line.Status != 404 || line.ClientIP != "10.0.4.18" {
+		t.Errorf("Gin access fields were not parsed: %+v", line)
+	}
+	if line.RequestTarget != "/v1/user?id=7" || line.Path != "/v1/user" {
+		t.Errorf("target/path = %q / %q", line.RequestTarget, line.Path)
+	}
+	if line.LatencyMS == nil || *line.LatencyMS != 1.25 {
+		t.Errorf("latency = %v, want 1.25ms", line.LatencyMS)
+	}
+	if !line.HasAccess {
+		t.Error("HasAccess = false for a Gin access line")
+	}
+}
+
+func TestParseGinNormalisesDurationUnitsAndColors(t *testing.T) {
+	tests := []struct {
+		duration string
+		wantMS   float64
+	}{
+		{"750ns", 0.00075},
+		{"250µs", 0.25},
+		{"3.5ms", 3.5},
+		{"1.25s", 1250},
+		{"1m2.5s", 62500},
+		{"1h2m3s", 3723000},
+	}
+	for _, tc := range tests {
+		f := DefaultLogFormat()
+		raw := "\x1b[97;42m[GIN]\x1b[0m 2026/08/21 - 11:00:00 |\x1b[97;41m 500 \x1b[0m| " +
+			tc.duration + " | 10.0.0.3 |\x1b[97;44m POST    \x1b[0m \"/v1/stress\""
+		line, err := f.Parse(raw, time.Time{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if line.LatencyMS == nil || *line.LatencyMS != tc.wantMS {
+			t.Errorf("%s = %v, want %vms", tc.duration, line.LatencyMS, tc.wantMS)
+		}
+		if line.Status != 500 || line.Method != "POST" {
+			t.Errorf("colored Gin line was not parsed: %+v", line)
+		}
+	}
+}
+
+func TestLogPresetCanRestrictRecognition(t *testing.T) {
+	ginRaw := `[GIN] 2026/08/21 - 11:00:00 | 200 | 2ms | 10.0.0.3 | GET "/healthcheck"`
+	f := DefaultLogFormat()
+	f.Preset = LogPresetJSON
+	line, err := f.Parse(ginRaw, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line.HasAccess {
+		t.Error("JSON preset parsed a Gin line")
+	}
+
+	f.Preset = LogPresetGin
+	line, err = f.Parse(sampleAccess, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line.HasAccess {
+		t.Error("Gin preset parsed structured JSON access fields")
+	}
+}
+
 func TestParseNonEnvelopeInputDoesNotFail(t *testing.T) {
 	f := DefaultLogFormat()
 	fallback := time.Date(2026, 8, 9, 4, 0, 0, 0, time.UTC)

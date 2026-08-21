@@ -88,11 +88,11 @@ func TestPodTrafficCountsBothPopulationsSeparately(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"count(log_processed.status) as requests",
-		"count(log_processed.latency_ms) as latencySamples",
-		"pct(log_processed.latency_ms, 50) as p50",
-		"pct(log_processed.latency_ms, 90) as p90",
-		"pct(log_processed.latency_ms, 99) as p99",
+		"count(status) as requests",
+		"count(latencyMs) as latencySamples",
+		"pct(latencyMs, 50) as p50",
+		"pct(latencyMs, 90) as p90",
+		"pct(latencyMs, 99) as p99",
 		"by bin(5m) as t",
 		"filter kubernetes.namespace_name = 'default'",
 	} {
@@ -159,7 +159,7 @@ func TestBadStatusListAndSeriesShareOneFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	filter := "log_processed.status not in [200, 201]"
+	filter := "status not in [200, 201]"
 	if !strings.Contains(series.Text, filter) {
 		t.Errorf("series query lost the filter:\n%s", series.Text)
 	}
@@ -209,7 +209,7 @@ func TestProbePathsAreExcludedFromEveryPodQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := "log_processed.path not in ['/health', '/healthcheck']"
+	want := "path not in ['/health', '/healthcheck']"
 	for name, got := range map[string]Query{
 		"traffic":          traffic,
 		"badStatus.series": badSeries,
@@ -232,7 +232,7 @@ func TestProbeExclusionKeepsLinesThatHaveNoPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got.Text, "not ispresent(log_processed.path) or") {
+	if !strings.Contains(got.Text, "not ispresent(path) or") {
 		t.Errorf("the exclusion is not guarded on ispresent:\n%s", got.Text)
 	}
 }
@@ -254,7 +254,7 @@ func TestProbeExclusionIsIdenticalAcrossListAndAggregate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	clause := "log_processed.path not in ['/health', '/healthz', '/readyz']"
+	clause := "path not in ['/health', '/healthz', '/readyz']"
 	if !strings.Contains(series.Text, clause) {
 		t.Errorf("aggregate:\n%s", series.Text)
 	}
@@ -327,15 +327,56 @@ func TestPodBadStatusListSelectsTheCopyableColumns(t *testing.T) {
 	}
 	for _, want := range []string{
 		"kubernetes.pod_name as pod",
-		"log_processed.path as path",
-		"log_processed.status as status",
-		"log_processed.latency_ms as latencyMs",
-		"log_processed.client_ip as clientIp",
+		"coalesce(log_processed.path, ginTarget) as requestTarget",
+		"coalesce(log_processed.status, ginStatusNumber) as status",
+		"coalesce(jsonLatencyMs, ginLatencyMs) as latencyMs",
+		"coalesce(log_processed.client_ip, ginClientIp) as clientIp",
 		"sort @timestamp desc",
 	} {
 		if !strings.Contains(got.Text, want) {
 			t.Errorf("list query is missing %q:\n%s", want, got.Text)
 		}
+	}
+}
+
+func TestAutoPresetBuildsGinAndJSONAliases(t *testing.T) {
+	q := LogQueries{Format: DefaultLogFormat()}
+	got, err := q.PodTraffic(testWindow(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"parse message",
+		"(?<ginStatus>",
+		"coalesce(log_processed.app, kubernetes.container_name) as app",
+		"ginLatencyUnit = 'ns'",
+		"case(",
+		"parse requestTarget",
+	} {
+		if !strings.Contains(got.Text, want) {
+			t.Errorf("auto query is missing %q:\n%s", want, got.Text)
+		}
+	}
+}
+
+func TestPresetRestrictsInsightsParsing(t *testing.T) {
+	f := DefaultLogFormat()
+	f.Preset = LogPresetGin
+	ginQuery, err := (LogQueries{Format: f}).PodTraffic(testWindow(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(ginQuery.Text, "log_processed.") {
+		t.Errorf("Gin preset still reads JSON fields:\n%s", ginQuery.Text)
+	}
+
+	f.Preset = LogPresetJSON
+	jsonQuery, err := (LogQueries{Format: f}).PodTraffic(testWindow(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(jsonQuery.Text, "ginStatus") || strings.Contains(jsonQuery.Text, "parse message") {
+		t.Errorf("JSON preset still parses Gin fields:\n%s", jsonQuery.Text)
 	}
 }
 
@@ -363,6 +404,9 @@ func TestPodErrorQueriesCoverBothLevels(t *testing.T) {
 	}
 	if !strings.Contains(list.Text, "oomkilled") {
 		t.Errorf("OOM lines are not matched, so the pod-status panel loses its only OOM signal:\n%s", list.Text)
+	}
+	if !strings.Contains(list.Text, "not ispresent(status)") {
+		t.Errorf("access lines can leak into the ERROR panel:\n%s", list.Text)
 	}
 }
 

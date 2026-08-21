@@ -380,9 +380,21 @@ AWS_REGION=ap-northeast-2</pre>
 		<section class="card stack">
 			<h2 data-value>로그 파싱 규칙</h2>
 			<p class="tiny muted" data-value>
-				fluent-bit이 파싱해 둔 log_processed 필드를 우선 읽고, 없으면 평문에 정규식을 적용합니다.
-				아래에 실제 로그 한 줄을 붙여넣어 규칙이 맞는지 확인한 뒤 저장하세요.
+				자동 인식은 JSON access log와 Gin 기본 로그를 함께 읽습니다. 아래에 실제 로그 한 줄을
+				붙여넣어 결과를 확인한 뒤 저장하세요.
 			</p>
+
+			<div class="field preset-field">
+				<label for="logPreset">로그 형식 preset</label>
+				<select id="logPreset" class="control" bind:value={config.logFormat.preset}>
+					<option value="auto">자동 인식 · JSON + Gin</option>
+					<option value="gin">Gin 기본 로그</option>
+					<option value="json">JSON access log</option>
+				</select>
+				<p class="tiny muted" data-value>
+					자동 인식에서는 JSON 필드를 먼저 쓰고, 없으면 Gin access log를 파싱합니다.
+				</p>
+			</div>
 
 			<div class="fields">
 				{#each [['appField', '앱'], ['latencyField', '응답 시간'], ['statusField', '상태 코드'], ['methodField', '메소드'], ['pathField', '경로'], ['levelField', '레벨'], ['clientIpField', '클라이언트 IP']] as [key, label] (key)}
@@ -498,9 +510,9 @@ AWS_REGION=ap-northeast-2</pre>
 						<span class="muted tiny">네임스페이스</span><span data-value
 							>{preview.parsed.namespace || '—'}</span
 						>
-						<span class="muted tiny">메소드 · 경로</span><span data-value class="mono"
+						<span class="muted tiny">메소드 · 요청 대상</span><span data-value class="mono"
 							>{preview.parsed.method || '—'}
-							{preview.parsed.path || ''}</span
+							{preview.parsed.requestTarget || preview.parsed.path || ''}</span
 						>
 						<span class="muted tiny">상태</span><span data-value>
 							{preview.parsed.status || '—'}

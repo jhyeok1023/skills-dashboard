@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sort"
@@ -102,7 +103,8 @@ func (s *Service) runLogQueries(rc requestCtx, src logSource, name string, qs []
 		rc.w.Start.Unix(), rc.w.End.Unix(), rc.w.Period.Seconds())
 	ids := make([]string, 0, len(qs))
 	for _, q := range qs {
-		ids = append(ids, q.ID+":"+strconv.Itoa(q.Limit))
+		sum := sha256.Sum256([]byte(q.Text))
+		ids = append(ids, q.ID+":"+strconv.Itoa(q.Limit)+":"+fmt.Sprintf("%x", sum))
 	}
 	sort.Strings(ids)
 	b.WriteString("|" + strings.Join(ids, ","))
@@ -348,6 +350,7 @@ func (s *Service) buildPodStatusCodePanel(rc requestCtx) (*domain.Panel, error) 
 				"pod":       r["pod"],
 				"method":    r["method"],
 				"path":      r["path"],
+				"target":    r["requestTarget"],
 				"status":    r["status"],
 				"latencyMs": r["latencyMs"],
 				"clientIp":  r["clientIp"],
@@ -359,7 +362,7 @@ func (s *Service) buildPodStatusCodePanel(rc requestCtx) (*domain.Panel, error) 
 		{Key: "timestamp", Label: "시각", Mono: true},
 		{Key: "status", Label: "코드", Numeric: true, Copyable: true},
 		{Key: "method", Label: "메소드"},
-		{Key: "path", Label: "경로", Mono: true, Copyable: true},
+		{Key: "target", Label: "요청 대상", Mono: true, Copyable: true},
 		{Key: "latencyMs", Label: "응답 시간", Unit: domain.UnitMillis, Numeric: true},
 		{Key: "app", Label: "앱", Copyable: true},
 		{Key: "pod", Label: "팟", Mono: true, Copyable: true},
@@ -455,9 +458,8 @@ func (s *Service) buildPodErrorPanel(rc requestCtx) (*domain.Panel, error) {
 
 	var rows []domain.Row
 	if res, ok := results[list.ID]; ok {
-		msgField := rc.cfg.LogFormat.MessageField
 		for _, r := range res.Rows {
-			msg := r[msgField]
+			msg := r["message"]
 			if msg == "" {
 				msg = r["@message"]
 			}

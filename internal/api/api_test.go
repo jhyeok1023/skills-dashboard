@@ -115,6 +115,12 @@ func (s *stubLogs) startedGroups() []string {
 	return append([]string(nil), s.groups...)
 }
 
+func (s *stubLogs) startedQueries() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.starts...)
+}
+
 func classify(q string) string {
 	switch {
 	case strings.Contains(q, "latencySamples"):
@@ -125,7 +131,7 @@ func classify(q string) string {
 		return "badStatusSeries"
 	case strings.Contains(q, "as t, level"):
 		return "errorSeries"
-	case strings.Contains(q, "isWarn") && strings.Contains(q, "sort @timestamp desc"):
+	case strings.Contains(q, "as level") && strings.Contains(q, "sort @timestamp desc"):
 		return "errorList"
 	case strings.Contains(q, "as t, action"):
 		return "wafAction"
@@ -591,8 +597,8 @@ func TestLatencyPanelSeparatesItsTwoRequestPopulations(t *testing.T) {
 	}
 }
 
-// Health-check traffic is dropped in the query, so the bytes are never scanned
-// and every count on the panel already has it removed.
+// Health-check traffic is dropped before aggregation, so every count on the
+// panel already has it removed.
 func TestHealthCheckPathsAreExcludedFromPodLogQueries(t *testing.T) {
 	svc, h := newTestService(t)
 
@@ -609,9 +615,55 @@ func TestHealthCheckPathsAreExcludedFromPodLogQueries(t *testing.T) {
 		t.Fatal("no queries were issued")
 	}
 	for _, q := range started {
-		if !strings.Contains(q, "log_processed.path not in ['/health', '/healthcheck']") {
+		if !strings.Contains(q, "path not in ['/health', '/healthcheck']") {
 			t.Errorf("a pod-log query does not exclude probe traffic:\n%s", q)
 		}
+	}
+}
+
+func TestPodLogNamespaceCanOverrideTheStoredValue(t *testing.T) {
+	svc, h := newTestService(t)
+	cfg := svc.Store.Get()
+	cfg.Namespace = "stored"
+	cfg.LogFormat.Namespace = "stale-log-setting"
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := get(t, h, "/api/page/pod-logs?range=1h&period=5m&namespace=payments"); rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	started := svc.Clients.Logs.(*stubLogs).startedQueries()
+	if len(started) == 0 {
+		t.Fatal("no pod-log queries were issued")
+	}
+	for _, q := range started {
+		if !strings.Contains(q, "kubernetes.namespace_name = 'payments'") {
+			t.Errorf("query did not use the page namespace:\n%s", q)
+		}
+		if strings.Contains(q, "stale-log-setting") {
+			t.Errorf("query used the retired log-format namespace:\n%s", q)
+		}
+	}
+}
+
+func TestPodLogNamespaceCanSelectAll(t *testing.T) {
+	svc, h := newTestService(t)
+	if rec := get(t, h, "/api/page/pod-logs?range=1h&period=5m&namespace=%2A"); rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	for _, q := range svc.Clients.Logs.(*stubLogs).startedQueries() {
+		if strings.Contains(q, "kubernetes.namespace_name =") {
+			t.Errorf("all-namespace query still has a namespace filter:\n%s", q)
+		}
+	}
+}
+
+func TestPodLogNamespaceRejectsAnInvalidName(t *testing.T) {
+	_, h := newTestService(t)
+	rec := get(t, h, "/api/page/pod-logs?namespace=Not_A_Namespace")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400", rec.Code)
 	}
 }
 

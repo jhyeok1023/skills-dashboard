@@ -17,6 +17,8 @@ import (
 // line is itself JSON, publishes the decoded fields under log_processed. Lines
 // that are not access logs arrive as plain text, so both paths have to work.
 type LogFormat struct {
+	Preset LogPreset `json:"preset"`
+
 	// Envelope
 	TimeField      string `json:"timeField"`
 	MessageField   string `json:"messageField"`
@@ -53,8 +55,8 @@ type LogFormat struct {
 	// drags the latency percentiles toward a route that does no work. Worse,
 	// when a probe starts failing it floods the bad-response table with
 	// thousands of identical rows and pushes the real failures past the row
-	// limit. Excluding them is a filter in the query, so the bytes are never
-	// scanned and the counts beside the charts already have them removed.
+	// limit. Excluding them before stats keeps them out of every count and
+	// percentile. Logs Insights still charges for the selected time range.
 	//
 	// Matching is exact. A prefix rule would quietly swallow /healthy-users,
 	// and it would have to be reimplemented identically in the query builder
@@ -65,10 +67,19 @@ type LogFormat struct {
 	compiledLevel *regexp.Regexp
 }
 
+type LogPreset string
+
+const (
+	LogPresetAuto LogPreset = "auto"
+	LogPresetGin  LogPreset = "gin"
+	LogPresetJSON LogPreset = "json"
+)
+
 // DefaultLogFormat matches the Container Insights records this dashboard was
 // built against.
 func DefaultLogFormat() LogFormat {
 	return LogFormat{
+		Preset:         LogPresetAuto,
 		TimeField:      "time",
 		MessageField:   "log",
 		ProcessedField: "log_processed",
@@ -119,6 +130,11 @@ func (f *LogFormat) Compile() error {
 
 // Validate reports whether the format is usable.
 func (f *LogFormat) Validate() error {
+	switch f.Preset {
+	case LogPresetAuto, LogPresetGin, LogPresetJSON:
+	default:
+		return fmt.Errorf("preset %q must be auto, gin, or json", f.Preset)
+	}
 	if f.TimeField == "" {
 		return fmt.Errorf("timeField must be set")
 	}
@@ -136,19 +152,20 @@ func (f *LogFormat) Validate() error {
 // LogLine is one parsed record. Latency is normalised to milliseconds here so
 // that no consumer downstream has to know what unit the source used.
 type LogLine struct {
-	Timestamp time.Time `json:"timestamp"`
-	App       string    `json:"app"`
-	Pod       string    `json:"pod"`
-	Namespace string    `json:"namespace"`
-	Container string    `json:"container"`
-	Stream    string    `json:"stream"`
-	Method    string    `json:"method"`
-	Path      string    `json:"path"`
-	ClientIP  string    `json:"clientIp"`
-	Status    int       `json:"status"`
-	LatencyMS *float64  `json:"latencyMs"`
-	Level     string    `json:"level"`
-	Message   string    `json:"message"`
+	Timestamp     time.Time `json:"timestamp"`
+	App           string    `json:"app"`
+	Pod           string    `json:"pod"`
+	Namespace     string    `json:"namespace"`
+	Container     string    `json:"container"`
+	Stream        string    `json:"stream"`
+	Method        string    `json:"method"`
+	Path          string    `json:"path"`
+	RequestTarget string    `json:"requestTarget"`
+	ClientIP      string    `json:"clientIp"`
+	Status        int       `json:"status"`
+	LatencyMS     *float64  `json:"latencyMs"`
+	Level         string    `json:"level"`
+	Message       string    `json:"message"`
 
 	// HasAccess reports whether this line carried request fields at all, so a
 	// plain log line is never counted as a zero-latency request.
@@ -256,7 +273,7 @@ func (f *LogFormat) Parse(raw string, fallback time.Time) (LogLine, error) {
 		}
 	}
 
-	if len(processed) > 0 {
+	if len(processed) > 0 && f.Preset != LogPresetGin {
 		f.applyProcessed(&line, processed)
 	} else {
 		f.applyText(&line, line.Message)
@@ -272,7 +289,9 @@ func (f *LogFormat) Parse(raw string, fallback time.Time) (LogLine, error) {
 func (f *LogFormat) applyProcessed(line *LogLine, m map[string]any) {
 	line.App = firstString(line.App, str(m[f.AppField]))
 	line.Method = firstString(line.Method, str(m[f.MethodField]))
-	line.Path = firstString(line.Path, str(m[f.PathField]))
+	target := str(m[f.PathField])
+	line.RequestTarget = firstString(line.RequestTarget, target)
+	line.Path = firstString(line.Path, requestPath(target))
 	line.ClientIP = firstString(line.ClientIP, str(m[f.ClientIPField]))
 	line.Level = firstString(line.Level, strings.ToLower(str(m[f.LevelField])))
 
@@ -287,6 +306,9 @@ func (f *LogFormat) applyProcessed(line *LogLine, m map[string]any) {
 }
 
 func (f *LogFormat) applyText(line *LogLine, msg string) {
+	if (f.Preset == LogPresetAuto || f.Preset == LogPresetGin) && applyGin(line, msg) {
+		return
+	}
 	if f.compiledText == nil || msg == "" {
 		return
 	}
@@ -304,7 +326,8 @@ func (f *LogFormat) applyText(line *LogLine, msg string) {
 		case f.MethodField, "method":
 			line.Method = firstString(line.Method, m[i])
 		case f.PathField, "path":
-			line.Path = firstString(line.Path, m[i])
+			line.RequestTarget = firstString(line.RequestTarget, m[i])
+			line.Path = firstString(line.Path, requestPath(m[i]))
 		case f.ClientIPField, "client_ip", "clientIp":
 			line.ClientIP = firstString(line.ClientIP, m[i])
 		case f.LevelField, "level":
@@ -321,6 +344,48 @@ func (f *LogFormat) applyText(line *LogLine, msg string) {
 			}
 		}
 	}
+}
+
+var (
+	ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	ginPattern  = regexp.MustCompile(`^\[GIN\]\s+\d{4}/\d{2}/\d{2}\s+-\s+\d{2}:\d{2}:\d{2}\s+\|\s*(?P<status>\d{3})\s*\|\s*(?P<latency>(?:\d+h)?(?:\d+m)?[\d.]+(?:ns|µs|μs|us|ms|s))\s*\|\s*(?P<client_ip>\S+)\s*\|\s*(?P<method>[A-Z]+)\s+"(?P<target>(?:\\.|[^"])*)"`)
+)
+
+func applyGin(line *LogLine, msg string) bool {
+	m := ginPattern.FindStringSubmatch(ansiPattern.ReplaceAllString(msg, ""))
+	if m == nil {
+		return false
+	}
+	values := make(map[string]string, len(m))
+	for i, name := range ginPattern.SubexpNames() {
+		if name != "" && i < len(m) {
+			values[name] = m[i]
+		}
+	}
+	line.Status, _ = strconv.Atoi(values["status"])
+	line.Method = values["method"]
+	line.ClientIP = values["client_ip"]
+	target := values["target"]
+	if unquoted, err := strconv.Unquote(`"` + target + `"`); err == nil {
+		target = unquoted
+	}
+	line.RequestTarget = target
+	line.Path = requestPath(target)
+	line.HasAccess = true
+
+	duration := strings.NewReplacer("μs", "µs", "us", "µs").Replace(values["latency"])
+	if d, err := time.ParseDuration(duration); err == nil {
+		ms := float64(d) / float64(time.Millisecond)
+		line.LatencyMS = P(ms)
+	}
+	return true
+}
+
+func requestPath(target string) string {
+	if i := strings.IndexByte(target, '?'); i >= 0 {
+		return target[:i]
+	}
+	return target
 }
 
 // applyLevel classifies a line that carries no explicit level by scanning its

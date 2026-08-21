@@ -45,8 +45,8 @@ type LogQueries struct {
 
 // namespaceFilter restricts results to the configured namespace. The reference
 // implementation hard-coded "default" in Go and dropped everything else after
-// downloading it; pushing the filter into the query means the bytes are never
-// scanned in the first place.
+// downloading it. The filter runs before aggregation, but it does not reduce
+// Logs Insights scanned bytes unless the account uses a matching field index.
 func (q LogQueries) namespaceFilter() (string, error) {
 	if q.Format.Namespace == "" {
 		return "", nil
@@ -62,12 +62,8 @@ func (q LogQueries) namespaceFilter() (string, error) {
 // output would simply go empty, which is a much worse failure than the noise
 // this is meant to remove.
 func (q LogQueries) excludePathFilter() (string, error) {
-	if len(q.Format.ExcludePaths) == 0 || q.Format.PathField == "" {
+	if len(q.Format.ExcludePaths) == 0 {
 		return "", nil
-	}
-	path, err := q.processedField(q.Format.PathField)
-	if err != nil {
-		return "", fmt.Errorf("pathField: %w", err)
 	}
 
 	// Exact match, deliberately. A substring or prefix rule would be the kind
@@ -86,7 +82,7 @@ func (q LogQueries) excludePathFilter() (string, error) {
 	}
 
 	return fmt.Sprintf("| filter not ispresent(%s) or %s not in [%s]\n",
-		path, path, strings.Join(exact, ", ")), nil
+		"path", "path", strings.Join(exact, ", ")), nil
 }
 
 func (q LogQueries) processedField(name string) (string, error) {
@@ -99,6 +95,111 @@ func (q LogQueries) processedField(name string) (string, error) {
 	return Field(q.Format.ProcessedField + "." + name)
 }
 
+const ginInsightsPattern = `(?:\x1b\[[0-9;]*m)*\[GIN\]\s+\d{4}/\d{2}/\d{2}\s+-\s+\d{2}:\d{2}:\d{2}\s+\|(?:\x1b\[[0-9;]*m)*\s*(?<ginStatus>\d{3})\s*(?:\x1b\[[0-9;]*m)*\|\s*(?:(?<ginHours>\d+)h)?(?:(?<ginMinutes>\d+)m)?(?<ginLatency>[\d.]+)(?<ginLatencyUnit>ns|µs|μs|us|ms|s)\s*\|\s*(?<ginClientIp>\S+)\s*\|(?:\x1b\[[0-9;]*m)*\s*(?<ginMethod>[A-Z]+)\s*(?:\x1b\[[0-9;]*m)*\s+"(?<ginTarget>(?:\\.|[^"])*)"`
+
+// accessPreamble gives structured JSON and Gin access lines one set of field
+// names. Every query reads those aliases, so auto detection cannot make the
+// latency panel and the bad-status panel disagree about the same line.
+func (q LogQueries) accessPreamble() (string, error) {
+	msg, err := Field(q.Format.MessageField)
+	if err != nil {
+		return "", fmt.Errorf("messageField: %w", err)
+	}
+
+	jsonFields := map[string]string{}
+	if q.Format.Preset != LogPresetGin {
+		for key, name := range map[string]string{
+			"app": q.Format.AppField, "latency": q.Format.LatencyField,
+			"status": q.Format.StatusField, "method": q.Format.MethodField,
+			"target": q.Format.PathField, "level": q.Format.LevelField,
+			"clientIp": q.Format.ClientIPField,
+		} {
+			if name == "" {
+				continue
+			}
+			field, err := q.processedField(name)
+			if err != nil {
+				return "", fmt.Errorf("%sField: %w", key, err)
+			}
+			jsonFields[key] = field
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "fields @timestamp, coalesce(%s, @message) as message\n", msg)
+	if q.Format.Preset != LogPresetJSON {
+		fmt.Fprintf(&b, "| parse message /%s/\n", ginInsightsPattern)
+	}
+
+	var calculated []string
+	jsonLatency := ""
+	if source := jsonFields["latency"]; source != "" {
+		expr := source
+		if q.Format.LatencyUnit == UnitSeconds {
+			expr = "(" + source + " * 1000)"
+		}
+		calculated = append(calculated, aliasExpr(expr, "jsonLatencyMs"))
+		jsonLatency = "jsonLatencyMs"
+	}
+	ginLatency, ginStatus := "", ""
+	if q.Format.Preset != LogPresetJSON {
+		calculated = append(calculated,
+			aliasExpr("(ginStatus * 1)", "ginStatusNumber"),
+			aliasExpr("case(ispresent(ginHours), ginHours * 3600000, 0) + "+
+				"case(ispresent(ginMinutes), ginMinutes * 60000, 0) + "+
+				"case(ginLatencyUnit = 's', ginLatency * 1000, "+
+				"ginLatencyUnit in ['µs', 'μs', 'us'], ginLatency / 1000, "+
+				"ginLatencyUnit = 'ns', ginLatency / 1000000, ginLatency)", "ginLatencyMs"),
+		)
+		ginLatency = "ginLatencyMs"
+		ginStatus = "ginStatusNumber"
+	}
+	if len(calculated) > 0 {
+		fmt.Fprintf(&b, "| fields %s\n", strings.Join(calculated, ", "))
+	}
+
+	fields := []string{
+		aliasExpr(coalesceExpr(jsonFields["app"], "kubernetes.container_name"), "app"),
+		aliasExpr(coalesceExpr(jsonFields["status"], ginStatus), "status"),
+		aliasExpr(coalesceExpr(jsonLatency, ginLatency), "latencyMs"),
+		aliasExpr(coalesceExpr(jsonFields["method"], ginField(q.Format.Preset, "ginMethod")), "method"),
+		aliasExpr(coalesceExpr(jsonFields["target"], ginField(q.Format.Preset, "ginTarget")), "requestTarget"),
+		aliasExpr(coalesceExpr(jsonFields["clientIp"], ginField(q.Format.Preset, "ginClientIp")), "clientIp"),
+		aliasExpr(coalesceExpr(jsonFields["level"], "''"), "rawLevel"),
+	}
+	fmt.Fprintf(&b, "| fields %s\n", strings.Join(fields, ", "))
+	b.WriteString("| parse requestTarget /^(?<requestPath>[^?]*)/\n")
+	b.WriteString("| fields coalesce(requestPath, requestTarget) as path\n")
+	return b.String(), nil
+}
+
+func ginField(preset LogPreset, name string) string {
+	if preset == LogPresetJSON {
+		return ""
+	}
+	return name
+}
+
+func coalesceExpr(values ...string) string {
+	kept := values[:0]
+	for _, value := range values {
+		if value != "" {
+			kept = append(kept, value)
+		}
+	}
+	if len(kept) == 0 {
+		return "''"
+	}
+	if len(kept) == 1 {
+		return kept[0]
+	}
+	return "coalesce(" + strings.Join(kept, ", ") + ")"
+}
+
+func aliasExpr(expr, alias string) string {
+	return expr + " as " + alias
+}
+
 // PodTraffic returns latency percentiles and request counts per bucket.
 //
 // Both populations are counted in the same query and named separately:
@@ -108,17 +209,9 @@ func (q LogQueries) processedField(name string) (string, error) {
 // "요청 수" in the UI, which is why the same panel could show two totals. Here
 // the difference is explicit on the wire and reported as each stat's basis.
 func (q LogQueries) PodTraffic(w Window) (Query, error) {
-	status, err := q.processedField(q.Format.StatusField)
+	preamble, err := q.accessPreamble()
 	if err != nil {
-		return Query{}, fmt.Errorf("statusField: %w", err)
-	}
-	latency, err := q.processedField(q.Format.LatencyField)
-	if err != nil {
-		return Query{}, fmt.Errorf("latencyField: %w", err)
-	}
-	app, err := q.processedField(q.Format.AppField)
-	if err != nil {
-		return Query{}, fmt.Errorf("appField: %w", err)
+		return Query{}, err
 	}
 	ns, err := q.namespaceFilter()
 	if err != nil {
@@ -130,17 +223,17 @@ func (q LogQueries) PodTraffic(w Window) (Query, error) {
 	}
 
 	var b strings.Builder
-	b.WriteString("fields @timestamp\n")
+	b.WriteString(preamble)
 	b.WriteString(ns)
 	b.WriteString(probes)
-	fmt.Fprintf(&b, "| filter ispresent(%s) or ispresent(%s)\n", status, latency)
-	fmt.Fprintf(&b, "| stats count(%s) as requests,\n", status)
-	fmt.Fprintf(&b, "        count(%s) as latencySamples,\n", latency)
-	fmt.Fprintf(&b, "        avg(%s) as avg,\n", latency)
-	fmt.Fprintf(&b, "        pct(%s, 50) as p50,\n", latency)
-	fmt.Fprintf(&b, "        pct(%s, 90) as p90,\n", latency)
-	fmt.Fprintf(&b, "        pct(%s, 99) as p99\n", latency)
-	fmt.Fprintf(&b, "    by bin(%s) as t, %s as app\n", w.Period, app)
+	b.WriteString("| filter ispresent(status) or ispresent(latencyMs)\n")
+	b.WriteString("| stats count(status) as requests,\n")
+	b.WriteString("        count(latencyMs) as latencySamples,\n")
+	b.WriteString("        avg(latencyMs) as avg,\n")
+	b.WriteString("        pct(latencyMs, 50) as p50,\n")
+	b.WriteString("        pct(latencyMs, 90) as p90,\n")
+	b.WriteString("        pct(latencyMs, 99) as p99\n")
+	fmt.Fprintf(&b, "    by bin(%s) as t, app\n", w.Period)
 	b.WriteString("| sort t asc")
 	return Query{ID: "pod.traffic", Text: b.String()}, nil
 }
@@ -149,13 +242,9 @@ func (q LogQueries) PodTraffic(w Window) (Query, error) {
 // a complete aggregate, so summing it yields the honest total that the
 // truncated detail list is compared against.
 func (q LogQueries) PodBadStatusSeries(w Window) (Query, error) {
-	status, err := q.processedField(q.Format.StatusField)
+	preamble, err := q.accessPreamble()
 	if err != nil {
-		return Query{}, fmt.Errorf("statusField: %w", err)
-	}
-	path, err := q.processedField(q.Format.PathField)
-	if err != nil {
-		return Query{}, fmt.Errorf("pathField: %w", err)
+		return Query{}, err
 	}
 	ns, err := q.namespaceFilter()
 	if err != nil {
@@ -167,11 +256,11 @@ func (q LogQueries) PodBadStatusSeries(w Window) (Query, error) {
 	}
 
 	var b strings.Builder
-	b.WriteString("fields @timestamp\n")
+	b.WriteString(preamble)
 	b.WriteString(ns)
 	b.WriteString(probes)
-	fmt.Fprintf(&b, "| filter ispresent(%s) and %s\n", status, notInStatuses(status, q.Format.OKStatuses))
-	fmt.Fprintf(&b, "| stats count() as n by bin(%s) as t, %s as status, %s as path\n", w.Period, status, path)
+	fmt.Fprintf(&b, "| filter ispresent(status) and %s\n", notInStatuses("status", q.Format.OKStatuses))
+	fmt.Fprintf(&b, "| stats count() as n by bin(%s) as t, status, path\n", w.Period)
 	b.WriteString("| sort t asc")
 	return Query{ID: "pod.badStatus.series", Text: b.String()}, nil
 }
@@ -180,9 +269,9 @@ func (q LogQueries) PodBadStatusSeries(w Window) (Query, error) {
 // The filter is identical to PodBadStatusSeries so the list and the count it is
 // displayed beside can never describe different populations.
 func (q LogQueries) PodBadStatusList(w Window, limit int) (Query, error) {
-	status, err := q.processedField(q.Format.StatusField)
+	preamble, err := q.accessPreamble()
 	if err != nil {
-		return Query{}, fmt.Errorf("statusField: %w", err)
+		return Query{}, err
 	}
 	ns, err := q.namespaceFilter()
 	if err != nil {
@@ -198,10 +287,11 @@ func (q LogQueries) PodBadStatusList(w Window, limit int) (Query, error) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "fields @timestamp, %s\n", strings.Join(fields, ", "))
+	b.WriteString(preamble)
+	fmt.Fprintf(&b, "| fields @timestamp, %s\n", strings.Join(fields, ", "))
 	b.WriteString(ns)
 	b.WriteString(probes)
-	fmt.Fprintf(&b, "| filter ispresent(%s) and %s\n", status, notInStatuses(status, q.Format.OKStatuses))
+	fmt.Fprintf(&b, "| filter ispresent(status) and %s\n", notInStatuses("status", q.Format.OKStatuses))
 	b.WriteString("| sort @timestamp desc\n")
 	fmt.Fprintf(&b, "| limit %d", limit)
 	return Query{ID: "pod.badStatus.list", Text: b.String(), Limit: limit}, nil
@@ -211,6 +301,10 @@ func (q LogQueries) PodBadStatusList(w Window, limit int) (Query, error) {
 // aggregate, it exists so the detail list's header can show a real total rather
 // than the length of a capped array.
 func (q LogQueries) PodErrorSeries(w Window) (Query, error) {
+	preamble, err := q.accessPreamble()
+	if err != nil {
+		return Query{}, err
+	}
 	ns, err := q.namespaceFilter()
 	if err != nil {
 		return Query{}, err
@@ -225,7 +319,7 @@ func (q LogQueries) PodErrorSeries(w Window) (Query, error) {
 	}
 
 	var b strings.Builder
-	b.WriteString("fields @timestamp\n")
+	b.WriteString(preamble)
 	b.WriteString(ns)
 	b.WriteString(probes)
 	b.WriteString(filter)
@@ -236,6 +330,10 @@ func (q LogQueries) PodErrorSeries(w Window) (Query, error) {
 
 // PodErrorList returns the most recent ERROR and WARN lines.
 func (q LogQueries) PodErrorList(w Window, limit int) (Query, error) {
+	preamble, err := q.accessPreamble()
+	if err != nil {
+		return Query{}, err
+	}
 	ns, err := q.namespaceFilter()
 	if err != nil {
 		return Query{}, err
@@ -244,17 +342,14 @@ func (q LogQueries) PodErrorList(w Window, limit int) (Query, error) {
 	if err != nil {
 		return Query{}, err
 	}
-	msg, err := Field(q.Format.MessageField)
-	if err != nil {
-		return Query{}, fmt.Errorf("messageField: %w", err)
-	}
 	probes, err := q.excludePathFilter()
 	if err != nil {
 		return Query{}, err
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "fields @timestamp, %s, kubernetes.pod_name as pod, kubernetes.container_name as container\n", msg)
+	b.WriteString(preamble)
+	b.WriteString("| fields @timestamp, message, kubernetes.pod_name as pod, kubernetes.container_name as container\n")
 	b.WriteString(ns)
 	b.WriteString(probes)
 	b.WriteString(filter)
@@ -267,51 +362,20 @@ func (q LogQueries) PodErrorList(w Window, limit int) (Query, error) {
 // and falling back to a pattern match over the raw message. The `level` column
 // it defines is what PodErrorSeries groups by.
 func (q LogQueries) levelFilter() (string, error) {
-	msg, err := Field(q.Format.MessageField)
-	if err != nil {
-		return "", fmt.Errorf("messageField: %w", err)
-	}
 	var b strings.Builder
-	if q.Format.LevelField != "" {
-		lvl, err := q.processedField(q.Format.LevelField)
-		if err != nil {
-			return "", fmt.Errorf("levelField: %w", err)
-		}
-		fmt.Fprintf(&b, "| fields coalesce(%s, '') as rawLevel\n", lvl)
-	} else {
-		b.WriteString("| fields '' as rawLevel\n")
-	}
 	// Normalise into two buckets so the series has a stable set of keys.
-	fmt.Fprintf(&b, "| fields lower(rawLevel) as lvl, %s as raw\n", msg)
+	b.WriteString("| fields lower(rawLevel) as lvl, message as raw\n")
 	b.WriteString("| filter lvl in ['error', 'err', 'fatal', 'panic', 'warn', 'warning']\n")
-	b.WriteString("    or (lvl = '' and raw like /(?i)\\b(error|fatal|panic|warn|warning|oomkilled)\\b/)\n")
-	b.WriteString("| fields (lvl in ['warn', 'warning'] or (lvl = '' and raw like /(?i)\\b(warn|warning)\\b/)) as isWarn\n")
-	b.WriteString("| fields (isWarn ? 'warn' : 'error') as level\n")
+	b.WriteString("    or (lvl = '' and not ispresent(status) and raw like /(?i)\\b(error|fatal|panic|warn|warning|oomkilled)\\b/)\n")
+	b.WriteString("| fields if(lvl in ['warn', 'warning'] or (lvl = '' and not ispresent(status) and raw like /(?i)\\b(warn|warning)\\b/), 'warn', 'error') as level\n")
 	return b.String(), nil
 }
 
 func (q LogQueries) accessFields() ([]string, error) {
-	out := []string{"kubernetes.pod_name as pod"}
-	for _, spec := range []struct {
-		name, alias string
-	}{
-		{q.Format.AppField, "app"},
-		{q.Format.MethodField, "method"},
-		{q.Format.PathField, "path"},
-		{q.Format.StatusField, "status"},
-		{q.Format.LatencyField, "latencyMs"},
-		{q.Format.ClientIPField, "clientIp"},
-	} {
-		if spec.name == "" {
-			continue
-		}
-		f, err := q.processedField(spec.name)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, fmt.Sprintf("%s as %s", f, spec.alias))
-	}
-	return out, nil
+	return []string{
+		"kubernetes.pod_name as pod", "app", "method", "path",
+		"requestTarget", "status", "latencyMs", "clientIp",
+	}, nil
 }
 
 // notInStatuses renders the healthy-code exclusion. An empty set means every

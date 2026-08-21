@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/jhyeok1023/skills-dashboard/internal/awsx"
@@ -187,6 +189,26 @@ func (s *Service) window(r *http.Request) (domain.Window, error) {
 	return domain.Resolve(s.now(), q.Get("range"), q.Get("period"))
 }
 
+var namespaceRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+func (s *Service) requestConfig(r *http.Request) (config.Config, error) {
+	cfg := s.Store.Get()
+	cfg.LogFormat.Namespace = cfg.Namespace
+	if !r.URL.Query().Has("namespace") {
+		return cfg, nil
+	}
+	namespace := strings.TrimSpace(r.URL.Query().Get("namespace"))
+	if namespace == "*" {
+		cfg.LogFormat.Namespace = ""
+		return cfg, nil
+	}
+	if len(namespace) > 63 || !namespaceRe.MatchString(namespace) {
+		return cfg, fmt.Errorf("namespace %q는 올바른 Kubernetes namespace 이름이 아닙니다", namespace)
+	}
+	cfg.LogFormat.Namespace = namespace
+	return cfg, nil
+}
+
 func (s *Service) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":          s.CredentialError == nil,
@@ -293,7 +315,12 @@ func (s *Service) handlePanel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rc := requestCtx{ctx: r.Context(), w: win, cfg: s.Store.Get()}
+	cfg, err := s.requestConfig(r)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	rc := requestCtx{ctx: r.Context(), w: win, cfg: cfg}
 	payload := domain.NewPayload(win)
 	panel, err := build(rc)
 	if err != nil {
@@ -320,7 +347,12 @@ func (s *Service) handlePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rc := requestCtx{ctx: r.Context(), w: win, cfg: s.Store.Get()}
+	cfg, err := s.requestConfig(r)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	rc := requestCtx{ctx: r.Context(), w: win, cfg: cfg}
 	builders := s.panelBuilders()
 	payload := domain.NewPayload(win)
 

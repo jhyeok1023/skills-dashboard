@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { LONG_ARN, LONG_POD, mockApi, PAGES } from './fixtures';
+import { config as CONFIG, LONG_ARN, LONG_POD, mockApi, PAGES } from './fixtures';
 
 /**
  * Layout checks against the real build.
@@ -243,6 +243,26 @@ test('changing the range updates the URL and refetches', async ({ page }) => {
 	await expect.poll(() => requests.some((u) => u.includes('range=4h'))).toBe(true);
 });
 
+test('the pod log namespace filter updates the URL and refetches', async ({ page }) => {
+	await open(page, '/logs/pod');
+
+	const requests: string[] = [];
+	page.on('request', (request) => {
+		if (request.url().includes('/api/page/pod-logs')) requests.push(request.url());
+	});
+
+	await page.getByLabel('namespace 필터 방식').selectOption('custom');
+	await page.getByLabel('조회할 namespace').fill('payments');
+	await page.getByRole('button', { name: '적용' }).click();
+
+	await expect.poll(() => new URL(page.url()).searchParams.get('namespace')).toBe('payments');
+	await expect
+		.poll(() =>
+			requests.some((request) => new URL(request).searchParams.get('namespace') === 'payments')
+		)
+		.toBe(true);
+});
+
 test('the period selector only offers periods valid for the range', async ({ page }) => {
 	await open(page, '/');
 	const picker = page.getByTestId('time-range-picker');
@@ -272,6 +292,26 @@ test('the log format preview reports what a sample line parsed to', async ({ pag
 	await expect(preview).toBeVisible();
 	await expect(preview.locator('.badge', { hasText: '인식됨' })).toBeVisible();
 	await expect(preview.locator('text=503')).toBeVisible();
+});
+
+test('legacy null selections do not hide the settings form', async ({ page }) => {
+	await mockApi(page);
+	await page.route('**/api/config', (route) =>
+		route.fulfill({
+			status: 200,
+			contentType: 'application/json',
+			body: JSON.stringify({
+				...CONFIG,
+				targetGroups: null,
+				rdsProxies: null,
+				webAcls: null
+			})
+		})
+	);
+	await page.goto('/settings');
+
+	await expect(page.getByRole('heading', { name: '모니터링 대상' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: '로그 파싱 규칙' })).toBeVisible();
 });
 
 // Both log group fields used to share one discovery result, so the WAF listing

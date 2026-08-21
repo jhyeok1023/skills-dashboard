@@ -87,14 +87,14 @@ const statusPanel = {
 		columns: [
 			{ key: 'timestamp', label: '시각', mono: true },
 			{ key: 'status', label: '코드', numeric: true, copyable: true },
-			{ key: 'path', label: '경로', mono: true, copyable: true },
+			{ key: 'target', label: '요청 대상', mono: true, copyable: true },
 			{ key: 'pod', label: '팟', mono: true, copyable: true },
 			{ key: 'clientIp', label: '클라이언트 IP', mono: true, copyable: true }
 		],
 		rows: Array.from({ length: 300 }, () => ({
 			timestamp: '2026-08-10 07:12:04.000',
 			status: '503',
-			path: LONG_PATH,
+			target: `${LONG_PATH}?requestid=fixture`,
 			pod: LONG_POD,
 			clientIp: '10.0.3.123'
 		})),
@@ -486,7 +486,7 @@ function targetGroup(app: string, lbName: string, lbDimension: string) {
 	};
 }
 
-const config = {
+export const config = {
 	region: 'ap-northeast-2',
 	wafRegion: 'us-east-1',
 	clusterName: 'prod',
@@ -499,6 +499,7 @@ const config = {
 	webAcls: ['skills-waf'],
 	wafHeaders: ['Host', 'User-Agent'],
 	logFormat: {
+		preset: 'auto',
 		timeField: 'time',
 		messageField: 'log',
 		processedField: 'log_processed',
@@ -558,6 +559,7 @@ export async function mockApi(page: Page) {
 					stream: 'stdout',
 					method: 'GET',
 					path: LONG_PATH,
+					requestTarget: `${LONG_PATH}?requestid=fixture`,
 					clientIp: '10.0.3.123',
 					status: 503,
 					latencyMs: 12.5,

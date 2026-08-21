@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jhyeok1023/skills-dashboard/internal/domain"
 )
 
 func writeFile(t *testing.T, dir, name, body string) string {
@@ -337,7 +339,8 @@ func TestNewStoreDropsAnUnusableValueInsteadOfRefusingToStart(t *testing.T) {
 		"region": "ap-northeast-2",
 		"clusterName": "prod",
 		"loadBalancer": "my-alb",
-		"wafHeaders": ["Host", "User Agent"]
+		"wafHeaders": ["Host", "User Agent"],
+		"logFormat": {"preset":"auto", "timeField":"time", "messageField":"log", "latencyUnit":"ms"}
 	}`)
 
 	s, err := NewStore(p)
@@ -370,6 +373,58 @@ func TestNewStoreDropsAnUnusableValueInsteadOfRefusingToStart(t *testing.T) {
 	bad.LoadBalancer = "my-alb"
 	if err := s.Set(bad); err == nil {
 		t.Error("the settings page accepted a load balancer name")
+	}
+}
+
+func TestNewStoreDiscardsLegacyLogFormatOnly(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "config.json", `{
+		"region":"ap-northeast-2",
+		"clusterName":"prod",
+		"namespace":"skills",
+		"logFormat":{
+			"timeField":"old_time",
+			"messageField":"old_message",
+			"latencyField":"old_latency",
+			"latencyUnit":"s"
+		}
+	}`)
+
+	s, err := NewStore(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.Get()
+	if got.ClusterName != "prod" || got.Namespace != "skills" {
+		t.Errorf("non-log settings were discarded: %+v", got)
+	}
+	if got.LogFormat.Preset != domain.LogPresetAuto || got.LogFormat.MessageField != "log" {
+		t.Errorf("legacy log format survived: %+v", got.LogFormat)
+	}
+	if len(s.Notices()) != 1 || !strings.Contains(s.Notices()[0], "로그 파싱 규칙") {
+		t.Errorf("migration notice = %v", s.Notices())
+	}
+}
+
+func TestEmptyResourceSelectionsStayJSONArrays(t *testing.T) {
+	s, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.Get()
+	if got.TargetGroups == nil || got.RDSProxies == nil || got.WebACLs == nil {
+		t.Errorf("default selections contain nil: %+v", got)
+	}
+
+	got.TargetGroups = nil
+	got.RDSProxies = nil
+	got.WebACLs = nil
+	if err := s.Set(got); err != nil {
+		t.Fatal(err)
+	}
+	got = s.Get()
+	if got.TargetGroups == nil || got.RDSProxies == nil || got.WebACLs == nil {
+		t.Errorf("saved nil selections were not repaired: %+v", got)
 	}
 }
 

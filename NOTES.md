@@ -37,7 +37,7 @@
 ### 2026-08-10 헬스체크 경로를 팟 로그 집계에서 제외한다
 
 - 맥락: 몇 초마다 도는 liveness/readiness 프로브가 요청 라인의 최대 공급원이라, 아무 일도 하지 않는 경로 쪽으로 응답 시간 백분위를 끌어내린다. 프로브가 실패하기 시작하면 동일한 행 수천 개가 비정상 응답 표를 채워 진짜 장애를 `LIMIT` 밖으로 밀어낸다.
-- 채택: `LogFormat.ExcludePaths`(기본 `/health`, `/healthcheck`)를 두고 **Insights 쿼리 단계**에서 거른다. 스캔 바이트가 줄고, 차트 옆 숫자도 이미 제외된 값이 된다. 팟 로그 쿼리 5종(traffic / badStatus 집계·목록 / error 집계·목록)에 동일하게 적용해 목록과 그 옆 건수가 다른 모집단을 세는 일이 없게 했다. 각 stat의 `basis`에 제외된 경로를 명시한다.
+- 채택: `LogFormat.ExcludePaths`(기본 `/health`, `/healthcheck`)를 두고 **Insights 집계 전**에 거른다. 차트 옆 숫자는 이미 제외한 값이 된다. 팟 로그 쿼리 5종(traffic / badStatus 집계·목록 / error 집계·목록)에 같은 조건을 적용한다. 목록과 그 옆 건수가 다른 모집단을 세지 않는다. 각 stat의 `basis`에 제외한 경로를 명시한다. 일반 `filter`는 Logs Insights 스캔량을 줄이지 않는다.
 - 기각: ⓐ 응답을 받은 뒤 Go에서 거르는 안 — 스캔 비용이 그대로다. ⓑ 접두어·부분 일치 — `/healthy-users`를 함께 삼키고, 설정 미리보기(Go)와 쿼리(Insights)에서 규칙을 두 번 구현해야 해 어긋날 여지가 생긴다. 정확 일치로 고정했다.
 - 대가: `/health/live` 처럼 하위 경로를 쓰면 목록에 직접 추가해야 한다.
 - 주의: 필터는 `not ispresent(path) or path not in [...]` 형태여야 한다. Insights에서 없는 필드에 대한 비교는 매칭되지 않으므로, 가드 없이 쓰면 path가 없는 평문 로그가 전부 사라져 ERROR·WARN 패널이 빈다.

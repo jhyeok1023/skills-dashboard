@@ -90,12 +90,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 const REQUEST_TIMEOUT_MS = 35_000;
 
 /** Builds the query string shared by every data endpoint. */
-function windowQuery(range: string, period: string): string {
+function windowQuery(range: string, period: string, namespace = ''): string {
 	const q = new URLSearchParams();
 	if (range) q.set('range', range);
 	if (period) q.set('period', period);
+	if (namespace) q.set('namespace', namespace);
 	const s = q.toString();
 	return s ? `?${s}` : '';
+}
+
+function normalizeConfig(config: Config): Config {
+	return {
+		...config,
+		targetGroups: config.targetGroups ?? [],
+		rdsProxies: config.rdsProxies ?? [],
+		webAcls: config.webAcls ?? [],
+		wafHeaders: config.wafHeaders ?? [],
+		logFormat: {
+			...config.logFormat,
+			okStatuses: config.logFormat.okStatuses ?? [],
+			excludePaths: config.logFormat.excludePaths ?? []
+		}
+	};
 }
 
 export const api = {
@@ -103,16 +119,18 @@ export const api = {
 	identity: () => request<Identity>('/api/identity'),
 	health: () => request<{ ok: boolean; credentials: boolean }>('/api/health'),
 
-	page: (id: string, range: string, period: string, signal?: AbortSignal) =>
-		request<Payload>(`/api/page/${id}${windowQuery(range, period)}`, { signal }),
+	page: (id: string, range: string, period: string, signal?: AbortSignal, namespace = '') =>
+		request<Payload>(`/api/page/${id}${windowQuery(range, period, namespace)}`, { signal }),
 
 	panel: (id: string, range: string, period: string, signal?: AbortSignal) =>
 		request<Payload>(`/api/panel/${id}${windowQuery(range, period)}`, { signal }),
 
-	config: () => request<Config>('/api/config'),
+	config: async () => normalizeConfig(await request<Config>('/api/config')),
 
-	saveConfig: (cfg: Config) =>
-		request<Config>('/api/config', { method: 'PUT', body: JSON.stringify(cfg) }),
+	saveConfig: async (cfg: Config) =>
+		normalizeConfig(
+			await request<Config>('/api/config', { method: 'PUT', body: JSON.stringify(cfg) })
+		),
 
 	discover: (kind: string, prefix = '') => {
 		const q = prefix ? `?prefix=${encodeURIComponent(prefix)}` : '';

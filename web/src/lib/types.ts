@@ -121,6 +121,7 @@ export interface Identity {
 }
 
 export interface LogFormat {
+	preset: 'auto' | 'gin' | 'json';
 	timeField: string;
 	messageField: string;
 	processedField: string;
@@ -184,6 +185,7 @@ export interface LogLine {
 	stream: string;
 	method: string;
 	path: string;
+	requestTarget: string;
 	clientIp: string;
 	status: number;
 	latencyMs: number | null;
