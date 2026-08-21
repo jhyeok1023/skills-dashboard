@@ -34,6 +34,13 @@ type LogFormat struct {
 	PathField     string `json:"pathField"`
 	LevelField    string `json:"levelField"`
 	ClientIPField string `json:"clientIpField"`
+	// UserAgentField is empty by default, and deliberately absent from
+	// DefaultLogFormat. Unlike a status or a path, an access log has a
+	// User-Agent only if the application chose to write one, and there is no
+	// name common enough to guess at. Left empty it is skipped everywhere —
+	// nothing extra is queried, nothing extra is sent — so an operator whose
+	// logs carry one opts in by naming it, and everyone else pays nothing.
+	UserAgentField string `json:"userAgentField"`
 
 	// Plain-text fallback. TextPattern is an optional RE2 with named capture
 	// groups matching the *Field names above; LevelPattern classifies a line

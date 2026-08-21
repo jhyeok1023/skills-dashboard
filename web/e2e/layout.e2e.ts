@@ -67,7 +67,8 @@ async function open(page: Page, path: string) {
 	await page.goto(path);
 	await expect(page.locator('h1')).toBeVisible();
 	// Charts mount in an effect; wait for the first one before measuring.
-	if (path !== '/settings') {
+	// The settings and check screens carry no panels; everything else does.
+	if (path !== '/settings' && path !== '/check') {
 		await page.locator('[data-panel]').first().waitFor();
 	}
 }
@@ -437,6 +438,31 @@ test('a discarded scope is reported beside the results it did not stop', async (
 	await expect(field.getByText(/CLOUDFRONT 스코프 조회 실패/)).toBeVisible();
 	// The regional ACL the operator can actually use is still offered.
 	await expect(field.getByText('skills-waf', { exact: true })).toBeVisible();
+});
+
+test('a list cut short says so on the chip fields too, not just the pickers', async ({ page }) => {
+	// Only the multi-select fields ever rendered `truncated`, so a capped log
+	// group list — the cap is 20 pages of 50 — looked exactly like a complete one.
+	await mockApi(page);
+	await page.route('**/api/discovery/loggroups*', (route) =>
+		route.fulfill({
+			status: 200,
+			contentType: 'application/json',
+			body: JSON.stringify({
+				kind: 'loggroups',
+				resources: [{ id: '/aws/containerinsights/prod/application', name: 'prod' }],
+				truncated: true
+			})
+		})
+	);
+	await page.goto('/settings');
+	await expect(page.locator('h1')).toBeVisible();
+
+	const field = pickerFor(page, '팟 로그 그룹');
+	await field.getByRole('button', { name: '자동 조회' }).click();
+	await expect(field.getByText(/중간에서 끊었습니다/)).toBeVisible();
+	// The entries it did return are still offered.
+	await expect(field.getByText('prod', { exact: true })).toBeVisible();
 });
 
 // One target group per application makes this list long, and it is the only

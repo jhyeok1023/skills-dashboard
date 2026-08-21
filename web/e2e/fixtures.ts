@@ -28,6 +28,10 @@ export const LONG_POD = 'product-api-deployment-7d9f8c6b5a-x2m4q-with-a-very-lon
 export const LONG_ARN =
 	'arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/k8s-default-product-d6d507c878/73e2d6bc24d8a067';
 export const LONG_PATH = '/v1/organizations/12345/members?include=profile,settings&sort=-createdAt';
+// The reason a User-Agent is a detail rather than a column: it is longer than
+// every other value on the row put together.
+export const LONG_USER_AGENT =
+	'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 
 const window = {
 	start: START,
@@ -89,19 +93,93 @@ const statusPanel = {
 			{ key: 'status', label: '코드', numeric: true, copyable: true },
 			{ key: 'target', label: '요청 대상', mono: true, copyable: true },
 			{ key: 'pod', label: '팟', mono: true, copyable: true },
-			{ key: 'clientIp', label: '클라이언트 IP', mono: true, copyable: true }
+			{ key: 'clientIp', label: '클라이언트 IP', mono: true, copyable: true },
+			// Detail only, and unconditional: these come from the Kubernetes
+			// envelope rather than the application's own line, so they are there
+			// whatever the operator configured. No userAgent here on purpose —
+			// this fixture is the default install, which has no such field.
+			{ key: 'container', label: '컨테이너', detail: true, mono: true, copyable: true },
+			{ key: 'namespace', label: '네임스페이스', detail: true, mono: true, copyable: true }
 		],
 		rows: Array.from({ length: 300 }, () => ({
 			timestamp: '2026-08-10 07:12:04.000',
 			status: '503',
 			target: `${LONG_PATH}?requestid=fixture`,
 			pod: LONG_POD,
-			clientIp: '10.0.3.123'
+			clientIp: '10.0.3.123',
+			container: 'product-api',
+			namespace: 'default'
 		})),
 		// Counted independently of the 300 rows carried.
 		total: 1284,
 		truncated: true,
 		limit: 300
+	}
+};
+
+/**
+ * One row per status code, its paths inside the row.
+ *
+ * The 404 row is the awkward one on purpose: more paths than the detail shows,
+ * so the "외 N개" tail is exercised, and a path long enough to wrap inside the
+ * expanded panel as well as the card.
+ */
+const statusBreakdownPanel = {
+	id: 'pod-status-breakdown',
+	title: '응답 코드별 경로',
+	stats: [
+		{
+			key: 'pod.badStatus.codes',
+			label: '코드 종류',
+			value: 3,
+			unit: 'count',
+			basis: '구간 내 관측된 비정상 응답 코드, /health · /healthcheck 제외'
+		},
+		{
+			key: 'pod.badStatus.byPath.total',
+			label: '비정상 응답',
+			value: 1284,
+			unit: 'count',
+			basis: '코드 · 경로별 집계 합계 (전체), /health · /healthcheck 제외'
+		}
+	],
+	bars: { keyColumn: 'status', valueColumn: 'count' },
+	table: {
+		columns: [
+			{ key: 'status', label: '코드', mono: true, copyable: true },
+			{ key: 'count', label: '건수', numeric: true },
+			{ key: 'paths', label: '경로 종류', numeric: true },
+			{ key: 'timestamp', label: '마지막 발생', mono: true },
+			{ key: 'topPaths', label: '상위 경로', detail: true, mono: true, copyable: true }
+		],
+		rows: [
+			{
+				status: '503',
+				count: 800,
+				paths: 1,
+				timestamp: '2026-08-10 07:44:00.000',
+				topPaths: '/v1/orders (800건)'
+			},
+			{
+				status: '404',
+				count: 420,
+				paths: 24,
+				timestamp: '2026-08-10 07:43:00.000',
+				topPaths: `${LONG_PATH} (300건) · /favicon.ico (80건) · /wp-login.php (40건) · 외 21개`
+			},
+			{
+				status: '403',
+				count: 64,
+				paths: 2,
+				timestamp: '2026-08-10 07:41:00.000',
+				topPaths: '/admin (60건) · /internal/metrics (4건)'
+			}
+		],
+		// The table lists codes and lists all of them, so its total is the row
+		// count and nothing was capped away at this level.
+		total: 3,
+		truncated: false,
+		limit: 20
 	}
 };
 
@@ -148,16 +226,48 @@ const breakdownPanel = {
 		columns: [
 			{ key: 'dimension', label: '구분' },
 			{ key: 'key', label: '값', mono: true, copyable: true },
-			{ key: 'count', label: '건수', numeric: true }
+			{ key: 'allow', label: '허용', numeric: true },
+			{ key: 'block', label: '차단', numeric: true },
+			{ key: 'other', label: '기타', numeric: true },
+			{ key: 'count', label: '합계', numeric: true },
+			{ key: 'lastAction', label: '마지막 처리' }
 		],
 		rows: [
-			{ dimension: 'method', key: 'GET', count: '15000' },
-			{ dimension: 'method', key: 'POST', count: '2000' },
-			{ dimension: 'path', key: LONG_PATH, count: '820' },
+			{
+				dimension: 'method',
+				key: 'GET',
+				allow: 14600,
+				block: 400,
+				other: 0,
+				count: 15000,
+				lastAction: 'BLOCK'
+			},
+			{
+				dimension: 'method',
+				key: 'POST',
+				allow: 2000,
+				block: 0,
+				other: 0,
+				count: 2000,
+				lastAction: 'ALLOW'
+			},
+			{
+				dimension: 'path',
+				key: LONG_PATH,
+				allow: 700,
+				block: 20,
+				other: 100,
+				count: 820,
+				lastAction: 'COUNT'
+			},
 			{
 				dimension: 'header:User-Agent',
 				key: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
-				count: '1100'
+				allow: 1100,
+				block: 0,
+				other: 0,
+				count: 1100,
+				lastAction: 'ALLOW'
 			}
 		],
 		total: 4,
@@ -267,12 +377,13 @@ const wafTrafficPanel = {
 		series('BLOCK', 'count', 'systemPink', 60)
 	],
 	stats: [
+		// No intent, matching the backend: blocked traffic is the normal state
+		// here, so it is not flagged. See buildWAFTrafficPanel.
 		{
 			key: 'waf.log.allow',
 			label: 'ALLOW',
 			value: 16200,
 			unit: 'count',
-			intent: 'good',
 			basis: 'WAF 로그 action 집계 (전체)'
 		},
 		{
@@ -280,8 +391,73 @@ const wafTrafficPanel = {
 			label: 'BLOCK',
 			value: 800,
 			unit: 'count',
-			intent: 'bad',
 			basis: 'WAF 로그 action 집계 (전체)'
+		}
+	],
+	// No bars: these are individual requests, not a distribution. The total is
+	// the action series' own sum, counted independently of the listed rows.
+	table: {
+		columns: [
+			{ key: 'timestamp', label: '시각', mono: true },
+			{ key: 'action', label: '처리' },
+			{ key: 'method', label: '메소드' },
+			{ key: 'uri', label: '경로', mono: true, copyable: true },
+			{ key: 'args', label: '쿼리', mono: true, copyable: true },
+			{ key: 'clientIp', label: '클라이언트', mono: true, copyable: true },
+			{ key: 'country', label: '국가' },
+			{ key: 'rule', label: '룰', copyable: true },
+			// Detail only: what an operator asks after "it was blocked", none of
+			// it short enough to earn a column.
+			{ key: 'ruleType', label: '룰 종류', detail: true },
+			{ key: 'userAgent', label: 'User-Agent', detail: true, mono: true, copyable: true },
+			{ key: 'responseCode', label: '응답 코드', detail: true }
+		],
+		rows: Array.from({ length: 300 }, (_, i) => ({
+			timestamp: '2026-08-10 07:12:04.000',
+			action: i % 5 === 0 ? 'BLOCK' : 'ALLOW',
+			method: 'GET',
+			uri: LONG_PATH.split('?')[0],
+			args: LONG_PATH.split('?')[1] ?? '',
+			clientIp: '203.0.113.42',
+			country: 'KR',
+			rule: i % 5 === 0 ? 'AWS-AWSManagedRulesSQLiRuleSet' : '',
+			ruleType: i % 5 === 0 ? 'MANAGED_RULE_GROUP' : '',
+			userAgent: LONG_USER_AGENT,
+			responseCode:
+				i % 5 === 0
+					? '403 · WAF 기본 차단 응답 (로그에 코드가 기록되지 않음)'
+					: 'WAF 로그에 없음 · 애플리케이션 응답 코드는 팟 로그에서 확인하세요'
+		})),
+		total: 17000,
+		truncated: true,
+		limit: 300
+	}
+};
+
+/**
+ * The panel the tooltip cap exists for: one line per pod per metric.
+ *
+ * Twenty-four series over a 220px chart is what the readout used to bury the
+ * chart under, so the fixture carries more series than the cap on purpose.
+ */
+const podResourcePanel = {
+	id: 'pod-cpu',
+	title: '팟 CPU 사용률',
+	series: Array.from({ length: 24 }, (_, i) =>
+		series(
+			`${LONG_POD.slice(0, -1)}${i} · ${i % 2 === 0 ? 'CPU 사용률' : 'CPU 사용률 (limit 대비)'}`,
+			'%',
+			i % 2 === 0 ? 'systemIndigo' : 'systemPurple',
+			10 + i
+		)
+	),
+	stats: [
+		{
+			key: 'pod.cpu.max',
+			label: '최대 CPU 사용률',
+			value: 74.2,
+			unit: '%',
+			basis: 'pod_cpu_utilization Average, 팟 12개'
 		}
 	]
 };
@@ -360,10 +536,10 @@ const pages: Record<string, unknown[]> = {
 		podStatusPanel,
 		wafTrafficPanel
 	],
-	'pod-logs': [latencyPanel, statusPanel, errorPanel],
+	'pod-logs': [latencyPanel, statusPanel, statusBreakdownPanel, errorPanel],
 	waf: [wafTrafficPanel, breakdownPanel],
 	targetgroup: [targetGroupPanel],
-	kubernetes: [countsPanel, podStatusPanel],
+	kubernetes: [podResourcePanel, countsPanel, podStatusPanel],
 	database: [rdsPanel]
 };
 
@@ -403,6 +579,12 @@ const identity = {
  * carry it, and a load balancer is offered as its CloudWatch dimension rather
  * than its ARN.
  */
+/** The CloudWatch dimension of each load balancer the fixtures place groups behind. */
+const ALB_DIMENSIONS: Record<string, string> = {
+	'my-alb': 'app/my-alb/50dc6c495c0c9188',
+	'internal-alb': 'app/internal-alb/9f2b1c0d4e5a6789'
+};
+
 const discoveries: Record<string, unknown[]> = {
 	clusters: [
 		{ id: 'prod', name: 'prod', extra: { logGroup: '/aws/containerinsights/prod/application' } }
@@ -426,17 +608,17 @@ const discoveries: Record<string, unknown[]> = {
 	// is the shape the settings page has to stay readable in. `payments` carries
 	// a deliberately long name: a layout defect shows on the longest string.
 	targetgroups: [
-		targetGroup('checkout', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
-		targetGroup('cart', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
-		targetGroup('search', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
-		targetGroup('product-catalogue', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
-		targetGroup('notifications', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
-		targetGroup('media', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
-		targetGroup('auth', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
-		targetGroup('billing', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
-		targetGroup('payments-settlement-reconciliation', 'my-alb', 'app/my-alb/50dc6c495c0c9188'),
-		targetGroup('admin', 'internal-alb', 'app/internal-alb/9f2b1c0d4e5a6789'),
-		targetGroup('batch', 'internal-alb', 'app/internal-alb/9f2b1c0d4e5a6789'),
+		targetGroup('checkout', 'my-alb'),
+		targetGroup('cart', 'my-alb'),
+		targetGroup('search', 'my-alb'),
+		targetGroup('product-catalogue', 'my-alb'),
+		targetGroup('notifications', 'my-alb'),
+		targetGroup('media', 'my-alb'),
+		targetGroup('auth', 'my-alb'),
+		targetGroup('billing', 'my-alb'),
+		targetGroup('payments-settlement-reconciliation', 'my-alb'),
+		targetGroup('admin', 'internal-alb'),
+		targetGroup('batch', 'internal-alb'),
 		// Registered with no load balancer, so it publishes no ApplicationELB
 		// metrics. It is listed anyway, last, rather than hidden.
 		{
@@ -476,8 +658,9 @@ const discoveries: Record<string, unknown[]> = {
 };
 
 /** One Kubernetes-managed target group, as discovery hands it over. */
-function targetGroup(app: string, lbName: string, lbDimension: string) {
+function targetGroup(app: string, lbName: keyof typeof ALB_DIMENSIONS) {
 	const name = `k8s-default-${app}-d6d507c878`;
+	const lbDimension = ALB_DIMENSIONS[lbName];
 	return {
 		id: `targetgroup/${name}/1a2b3c4d5e6f7890`,
 		name,
@@ -518,7 +701,8 @@ export const config = {
 		okStatuses: [200, 201],
 		excludePaths: ['/health', '/healthcheck']
 	},
-	limits: meta.limits
+	limits: meta.limits,
+	check: { url: 'https://api.example.com/health', expectStatus: 0 }
 };
 
 /** Serves the fixtures above for every /api call the page makes. */
@@ -533,6 +717,19 @@ export async function mockApi(page: Page) {
 		if (path === '/api/identity') return json(identity);
 		if (path === '/api/health') return json({ ok: true, credentials: true });
 		if (path === '/api/config') return json(config);
+
+		// A completed probe, whether or not the target was healthy: the check
+		// endpoint answers 200 either way, and the page reads `ok`.
+		if (path === '/api/check') {
+			return json({
+				url: config.check.url,
+				ok: true,
+				status: 200,
+				elapsedMs: 143,
+				at: new Date(window.end * 1000).toISOString(),
+				expect: '2xx'
+			});
+		}
 
 		const pageMatch = path.match(/^\/api\/page\/(.+)$/);
 		if (pageMatch) {
@@ -584,5 +781,6 @@ export const PAGES = [
 	{ path: '/infra/targetgroup', name: 'targetgroup' },
 	{ path: '/infra/kubernetes', name: 'kubernetes' },
 	{ path: '/infra/database', name: 'database' },
+	{ path: '/check', name: 'check' },
 	{ path: '/settings', name: 'settings' }
 ];

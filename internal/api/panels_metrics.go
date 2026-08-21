@@ -65,14 +65,32 @@ func metricCacheKey(name string, w domain.Window, reqs []awsx.MetricRequest) str
 // Nothing is dropped. The reference implementation's chart silently plotted
 // only the top six series and then recomputed its axes from that subset, so the
 // axis described less data than the panel claimed to show.
-func toSeries(w domain.Window, list []awsx.MetricSeries, spec domain.MetricSpec, labelFor func(awsx.MetricSeries) string) []*domain.Series {
+//
+// styleFor overrides the spec's colour and gives the line a dash pattern. It is
+// nil everywhere the spec's own colour is the answer — a WAF panel's 차단 line
+// is systemPink because blocking is what it means, and a per-series palette
+// would destroy that. It is set on the panels where one spec fans out into one
+// line per pod or node, and colour has to name the subject instead.
+func toSeries(
+	w domain.Window,
+	list []awsx.MetricSeries,
+	spec domain.MetricSpec,
+	labelFor func(awsx.MetricSeries) string,
+	styleFor func(awsx.MetricSeries) (color, dash string),
+) []*domain.Series {
 	out := make([]*domain.Series, 0, len(list))
 	for _, m := range list {
 		label := spec.Label
 		if labelFor != nil {
 			label = labelFor(m)
 		}
-		out = append(out, m.ToSeries(w, label, spec.Unit, spec.Color))
+		color, dash := spec.Color, domain.DashSolid
+		if styleFor != nil {
+			color, dash = styleFor(m)
+		}
+		s := m.ToSeries(w, label, spec.Unit, color)
+		s.Dash = dash
+		out = append(out, s)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i].Max(), out[j].Max()
@@ -126,6 +144,31 @@ func minOf(a, b float64) float64 {
 }
 
 func addOf(a, b float64) float64 { return a + b }
+
+// setSeriesLabel names one series of a panel plotted from several filter sets:
+// the metric, prefixed by the set when more than one is on the chart, and
+// suffixed by CloudWatch's own label when a single set matched several series.
+//
+// The suffix is what tells duplicates apart. One filter set normally yields one
+// series; it yields more whenever the SEARCH schema leaves a dimension
+// unpinned — a target group registered with two load balancers, a WAF metric
+// spanning rules — and then the set's own name labels every one of them
+// identically. CloudWatch's label carries the dimensions it actually matched.
+// Appending it only when there is something to disambiguate keeps the common
+// legend short.
+func setSeriesLabel(sets []filterSet, fs filterSet, spec domain.MetricSpec, n int) func(awsx.MetricSeries) string {
+	label := spec.Label
+	if len(sets) > 1 {
+		label = fs.label + " · " + spec.Label
+	}
+	ambiguous := n > 1
+	return func(m awsx.MetricSeries) string {
+		if ambiguous && m.Label != "" {
+			return label + " (" + m.Label + ")"
+		}
+		return label
+	}
+}
 
 // sumSeries collapses many series into one by adding them bucket by bucket.
 // Used where the individual series are not interesting on their own — the total
@@ -185,23 +228,7 @@ func (s *Service) buildTargetGroupPanel(rc requestCtx) (*domain.Panel, error) {
 		for _, fs := range sets {
 			list := results[spec.Key+"|"+fs.id]
 			awsx.SortSeries(list)
-			// One target group normally yields one series. It yields more when
-			// the group is registered with several load balancers, and then the
-			// app name alone names both of them identically — so CloudWatch's
-			// own label, which carries the dimensions it matched, is appended to
-			// tell them apart. Doing it only when there is something to
-			// disambiguate keeps the common legend short.
-			ambiguous := len(list) > 1
-			series := toSeries(rc.w, list, spec, func(m awsx.MetricSeries) string {
-				label := spec.Label
-				if len(sets) > 1 {
-					label = fs.label + " · " + spec.Label
-				}
-				if ambiguous && m.Label != "" {
-					label += " (" + m.Label + ")"
-				}
-				return label
-			})
+			series := toSeries(rc.w, list, spec, setSeriesLabel(sets, fs, spec, len(list)), nil)
 			panel.Series = append(panel.Series, series...)
 			byKey[spec.Key] = append(byKey[spec.Key], series...)
 		}
@@ -247,7 +274,7 @@ func (s *Service) buildTargetGroupPanel(rc requestCtx) (*domain.Panel, error) {
 // no metric at all and plotted as a flat empty series, which reads as "this app
 // had no traffic".
 func targetGroupFilterSets(cfg config.Config) []filterSet {
-	var out []filterSet
+	out := make([]filterSet, 0, len(cfg.TargetGroups))
 	for _, tg := range cfg.TargetGroups {
 		out = append(out, filterSet{
 			id:      tg,
@@ -275,17 +302,31 @@ func lastSegmentName(dimension string) string {
 	return dimension
 }
 
-func (s *Service) buildPodResourcePanel(rc requestCtx) (*domain.Panel, error) {
-	return s.buildResourcePanel(rc, "pod-resource", "팟 리소스 사용률", domain.PodResourceMetrics(), map[string]string{
-		"ClusterName": rc.cfg.ClusterName,
-		"Namespace":   rc.cfg.Namespace,
-	}, "팟")
+// podResourcePanel and nodeResourcePanel build one panel per resource rather
+// than one panel per subject. A single "pod resources" panel put CPU, memory
+// and both over-limit ratios on one chart, which is one line per pod per
+// metric: twenty pods drew eighty lines over 220 pixels. Splitting by prefix
+// costs nothing at the API — the same specs are still fetched, just grouped by
+// what they measure — and each chart gets its own axis and its own stat row.
+func (s *Service) podResourcePanel(id, title, prefix string) panelBuilder {
+	return func(rc requestCtx) (*domain.Panel, error) {
+		return s.buildResourcePanel(rc, id, title,
+			domain.SpecsWithPrefix(domain.PodResourceMetrics(), prefix),
+			map[string]string{
+				"ClusterName": rc.cfg.ClusterName,
+				"Namespace":   rc.cfg.Namespace,
+			}, "팟")
+	}
 }
 
-func (s *Service) buildNodeResourcePanel(rc requestCtx) (*domain.Panel, error) {
-	return s.buildResourcePanel(rc, "node-resource", "노드 리소스 사용률", domain.NodeResourceMetrics(), map[string]string{
-		"ClusterName": rc.cfg.ClusterName,
-	}, "노드")
+func (s *Service) nodeResourcePanel(id, title, prefix string) panelBuilder {
+	return func(rc requestCtx) (*domain.Panel, error) {
+		return s.buildResourcePanel(rc, id, title,
+			domain.SpecsWithPrefix(domain.NodeResourceMetrics(), prefix),
+			map[string]string{
+				"ClusterName": rc.cfg.ClusterName,
+			}, "노드")
+	}
 }
 
 func (s *Service) buildResourcePanel(rc requestCtx, id, title string, specs []domain.MetricSpec, filters map[string]string, noun string) (*domain.Panel, error) {
@@ -301,24 +342,46 @@ func (s *Service) buildResourcePanel(rc requestCtx, id, title string, specs []do
 		return nil, err
 	}
 
+	// Two passes over the fetched results, because both the colour and the
+	// count depend on the whole panel rather than on one spec.
 	empty := true
-	for _, spec := range specs {
+	live := make([][]awsx.MetricSeries, len(specs))
+	gone := make([]int, len(specs))
+	for i, spec := range specs {
 		list := results[spec.Key+"|cluster"]
 		if len(list) > 0 {
+			// Deliberately before the filter: a cluster that publishes nothing
+			// and a cluster whose old nodes are all that matched are different
+			// facts, and only the first one is about Container Insights.
 			empty = false
 		}
-		awsx.SortSeries(list)
-		series := toSeries(rc.w, list, spec, func(m awsx.MetricSeries) string {
-			return m.Label + " · " + spec.Label
-		})
+		live[i], gone[i] = dropSilent(list)
+		awsx.SortSeries(live[i])
+	}
+
+	subject := subjectIndex(live)
+	for i, spec := range specs {
+		dash := domain.VariantDash(i)
+		series := toSeries(rc.w, live[i], spec,
+			func(m awsx.MetricSeries) string { return m.Label + " · " + spec.Label },
+			func(m awsx.MetricSeries) (string, string) {
+				return domain.SubjectColor(subject[m.Label]), dash
+			})
 		panel.Series = append(panel.Series, series...)
 
+		basis := fmt.Sprintf("%s %s, %s %d개", spec.MetricName, spec.Stat, noun, len(series))
+		if gone[i] > 0 {
+			// Said rather than left silent, but said in the basis and not as a
+			// panel warning: a warning turns the whole card red, and a cluster
+			// rebuilt last week would light it up permanently for no fault.
+			basis += fmt.Sprintf(" (구간 내 데이터 없음 %d개 제외)", gone[i])
+		}
 		panel.Stats = append(panel.Stats, domain.Stat{
 			Key:    spec.Key + ".max",
 			Label:  "최대 " + spec.Label,
 			Unit:   spec.Unit,
 			Value:  reduceAcross(series, (*domain.Series).Max, maxOf),
-			Basis:  fmt.Sprintf("%s %s, %s %d개", spec.MetricName, spec.Stat, noun, len(series)),
+			Basis:  basis,
 			Intent: spec.Intent,
 		})
 	}
@@ -327,6 +390,57 @@ func (s *Service) buildResourcePanel(rc requestCtx, id, title string, specs []do
 		panel.Warn("Container Insights 지표가 없습니다. 클러스터에서 Container Insights가 활성화되어 있는지 확인하세요.")
 	}
 	return panel, nil
+}
+
+// dropSilent removes the results that carry no sample in the window, returning
+// what is left and how many went.
+//
+// A SEARCH matches CloudWatch's metric index, not the data in the requested
+// span, and the index keeps a metric for about a fortnight after its last
+// datapoint. Every node the cluster has ever run therefore comes back — a
+// rebuilt cluster answers with a fresh InstanceId each time — and each one drew
+// an all-gap line, took a legend row, and counted towards the panel's "노드 N개".
+// One live node read as a dozen.
+//
+// Only the fan-out panels call this. Where the subject is one the operator
+// picked — a target group, an RDS proxy — an empty series is the answer to
+// their question and has to stay on the chart.
+func dropSilent(list []awsx.MetricSeries) ([]awsx.MetricSeries, int) {
+	out := make([]awsx.MetricSeries, 0, len(list))
+	for _, m := range list {
+		if len(m.Points) > 0 {
+			out = append(out, m)
+		}
+	}
+	return out, len(list) - len(out)
+}
+
+// subjectIndex numbers the subjects a panel draws, so a colour can be looked up
+// by pod or node rather than by position in one spec's list.
+//
+// The numbering is over the union across specs and taken in label order, which
+// buys two things. A pod's CPU line and its over-limit line are the same
+// colour, because they are the same pod. And the colour does not move when the
+// next poll reorders the series — toSeries sorts by value, so the busiest pod
+// changes places constantly.
+func subjectIndex(live [][]awsx.MetricSeries) map[string]int {
+	seen := map[string]bool{}
+	var labels []string
+	for _, list := range live {
+		for _, m := range list {
+			if !seen[m.Label] {
+				seen[m.Label] = true
+				labels = append(labels, m.Label)
+			}
+		}
+	}
+	sort.Strings(labels)
+
+	idx := make(map[string]int, len(labels))
+	for i, l := range labels {
+		idx[l] = i
+	}
+	return idx
 }
 
 func (s *Service) buildCountsPanel(rc requestCtx) (*domain.Panel, error) {
@@ -345,13 +459,23 @@ func (s *Service) buildCountsPanel(rc requestCtx) (*domain.Panel, error) {
 		return nil, err
 	}
 
-	podSpec, nodeSpec := specs[0], specs[1]
-	podParts := toSeries(rc.w, results["count.pods|cluster"], podSpec, func(m awsx.MetricSeries) string { return m.Label })
+	// Looked up by key rather than by position: the specs are a list, and
+	// reading specs[0]/specs[1] out of it means adding a metric anywhere but
+	// the end silently repoints these two.
+	byKey := map[string]domain.MetricSpec{}
+	for _, spec := range specs {
+		byKey[spec.Key] = spec
+	}
+	podSpec, nodeSpec, failedSpec := byKey["count.pods"], byKey["count.nodes"], byKey["count.nodes.failed"]
+
+	podParts := toSeries(rc.w, results["count.pods|cluster"], podSpec, func(m awsx.MetricSeries) string { return m.Label }, nil)
 	pods := sumSeries(rc.w, podParts, "실행 중 팟", podSpec.Unit, podSpec.Color)
-	nodes := toSeries(rc.w, results["count.nodes|cluster"], nodeSpec, func(awsx.MetricSeries) string { return nodeSpec.Label })
+	nodes := toSeries(rc.w, results["count.nodes|cluster"], nodeSpec, func(awsx.MetricSeries) string { return nodeSpec.Label }, nil)
+	failed := toSeries(rc.w, results["count.nodes.failed|cluster"], failedSpec, func(awsx.MetricSeries) string { return failedSpec.Label }, nil)
 
 	panel.Series = append(panel.Series, pods)
 	panel.Series = append(panel.Series, nodes...)
+	panel.Series = append(panel.Series, failed...)
 
 	// Pods: minimum and maximum are what was observed over the window.
 	// CloudWatch does not publish a HorizontalPodAutoscaler's configured
@@ -368,6 +492,11 @@ func (s *Service) buildCountsPanel(rc requestCtx) (*domain.Panel, error) {
 	panel.Stats = append(panel.Stats, domain.Stat{
 		Key: "nodes.current", Label: "노드 (현재)", Unit: domain.UnitCount, Value: current,
 		Basis: "cluster_node_count",
+	})
+	panel.Stats = append(panel.Stats, domain.Stat{
+		Key: "nodes.failed", Label: "실패 노드", Unit: domain.UnitCount,
+		Value: reduceAcross(failed, (*domain.Series).Max, maxOf),
+		Basis: "cluster_failed_node_count Maximum, 구간 최대", Intent: failedSpec.Intent,
 	})
 
 	// Node bounds do have an authoritative source: the node groups' scaling
@@ -416,8 +545,13 @@ func (s *Service) buildPodStatusPanel(rc requestCtx) (*domain.Panel, error) {
 		return nil, err
 	}
 
+	empty := true
 	for _, spec := range specs {
-		parts := toSeries(rc.w, results[spec.Key+"|cluster"], spec, func(m awsx.MetricSeries) string { return m.Label })
+		list := results[spec.Key+"|cluster"]
+		if len(list) > 0 {
+			empty = false
+		}
+		parts := toSeries(rc.w, list, spec, func(m awsx.MetricSeries) string { return m.Label }, nil)
 		total := sumSeries(rc.w, parts, spec.Label, spec.Unit, spec.Color)
 		panel.Series = append(panel.Series, total)
 
@@ -431,11 +565,21 @@ func (s *Service) buildPodStatusPanel(rc requestCtx) (*domain.Panel, error) {
 		})
 	}
 
-	// Container Insights publishes no OOMKilled metric. Restarts are the
-	// closest signal it has, and the OOM count on the log panel comes from
-	// matching the pod log stream instead. Saying so beats implying the
+	// pod_status_* is published only by Container Insights with enhanced
+	// observability, so an empty panel here has two quite different causes and
+	// the warning has to name the one that is actually actionable. Without it,
+	// "no pods are failing" and "this cluster never publishes these metrics"
+	// look identical.
+	if empty {
+		panel.Warn("pod_status_* 지표가 없습니다. 이 지표는 Container Insights 확장 관찰성(amazon-cloudwatch-observability 애드온)에서만 게시됩니다.")
+	}
+
+	// This panel does not read the OOMKilled metric. Enhanced observability
+	// does publish one (pod_container_status_terminated_reason_oom_killed), but
+	// it appears only after the event, so the signal shown here is the restart
+	// count and the OOM count on the log panel. Saying so beats implying the
 	// restart count is an OOM count.
-	panel.Warn("Container Insights에는 OOMKilled 전용 지표가 없습니다. CrashLoop은 재시작 증가로, OOM은 팟 로그의 OOMKilled 패턴으로 확인하세요.")
+	panel.Warn("CrashLoop은 재시작 증가로, OOM은 팟 로그의 OOMKilled 패턴으로 확인하세요. 이 패널은 OOMKilled 지표를 읽지 않습니다.")
 	return panel, nil
 }
 
@@ -462,12 +606,7 @@ func (s *Service) buildRDSProxyPanel(rc requestCtx) (*domain.Panel, error) {
 		for _, fs := range sets {
 			list := results[spec.Key+"|"+fs.id]
 			awsx.SortSeries(list)
-			series := toSeries(rc.w, list, spec, func(awsx.MetricSeries) string {
-				if len(sets) == 1 {
-					return spec.Label
-				}
-				return fs.label + " · " + spec.Label
-			})
+			series := toSeries(rc.w, list, spec, setSeriesLabel(sets, fs, spec, len(list)), nil)
 			panel.Series = append(panel.Series, series...)
 			byKey[spec.Key] = append(byKey[spec.Key], series...)
 		}
@@ -524,12 +663,7 @@ func (s *Service) buildWAFMetricsPanel(rc requestCtx) (*domain.Panel, error) {
 		for _, fs := range sets {
 			list := results[spec.Key+"|"+fs.id]
 			awsx.SortSeries(list)
-			series := toSeries(rc.w, list, spec, func(awsx.MetricSeries) string {
-				if len(sets) == 1 {
-					return spec.Label
-				}
-				return fs.label + " · " + spec.Label
-			})
+			series := toSeries(rc.w, list, spec, setSeriesLabel(sets, fs, spec, len(list)), nil)
 			panel.Series = append(panel.Series, series...)
 			byKey[spec.Key] = append(byKey[spec.Key], series...)
 		}
@@ -538,10 +672,12 @@ func (s *Service) buildWAFMetricsPanel(rc requestCtx) (*domain.Panel, error) {
 	allowed := reduceAcross(byKey["waf.allowed"], (*domain.Series).Sum, addOf)
 	blocked := reduceAcross(byKey["waf.blocked"], (*domain.Series).Sum, addOf)
 	panel.Stats = []domain.Stat{
+		// Deliberately intent-free: see buildWAFTrafficPanel. Blocking is the
+		// normal state here, not a condition to raise.
 		{Key: "waf.allowed.total", Label: "허용", Unit: domain.UnitCount, Value: allowed,
-			Basis: "AWS/WAFV2 AllowedRequests Sum", Intent: domain.IntentGood},
+			Basis: "AWS/WAFV2 AllowedRequests Sum"},
 		{Key: "waf.blocked.total", Label: "차단", Unit: domain.UnitCount, Value: blocked,
-			Basis: "AWS/WAFV2 BlockedRequests Sum", Intent: domain.IntentBad},
+			Basis: "AWS/WAFV2 BlockedRequests Sum"},
 	}
 	if allowed != nil && blocked != nil && (*allowed+*blocked) > 0 {
 		rate := *blocked / (*allowed + *blocked) * 100

@@ -1,4 +1,5 @@
 import type {
+	CheckResult,
 	Config,
 	DiscoveryResponse,
 	Identity,
@@ -26,7 +27,18 @@ export class ApiFailure extends Error {
 	}
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * `timeoutMs` is only ever reported, never enforced — the caller supplies its
+ * own signal. It is threaded through so the message names the bound that
+ * actually elapsed: a page waits far longer than a discovery, and telling the
+ * operator it gave up after 35 seconds when it waited 95 sends them looking for
+ * the wrong thing.
+ */
+async function request<T>(
+	path: string,
+	init?: RequestInit,
+	timeoutMs = REQUEST_TIMEOUT_MS
+): Promise<T> {
 	let res: Response;
 	try {
 		res = await fetch(path, {
@@ -51,7 +63,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 		if (e instanceof DOMException && e.name === 'TimeoutError') {
 			throw new ApiFailure(
 				0,
-				`서버가 ${Math.round(REQUEST_TIMEOUT_MS / 1000)}초 안에 응답하지 않았습니다.`,
+				`서버가 ${Math.round(timeoutMs / 1000)}초 안에 응답하지 않았습니다.`,
 				'대시보드를 실행한 터미널의 로그를 확인하세요.'
 			);
 		}
@@ -89,6 +101,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
  */
 const REQUEST_TIMEOUT_MS = 35_000;
 
+/**
+ * PAGE_TIMEOUT_MS bounds a page or panel fetch, for the same reason and with
+ * the same ordering: it sits just past the server's own 90s page budget
+ * (api.pageBudget), so a page that runs long still gets to answer with the
+ * warnings it built rather than being cut off by the browser.
+ *
+ * Without it there was no bound at all. If the server never answered — a
+ * WriteTimeout closing the connection, a process killed mid-request — the
+ * skeleton pulsed indefinitely with nothing on screen to say why.
+ */
+const PAGE_TIMEOUT_MS = 95_000;
+
+/**
+ * Combines the caller's cancellation with the page timeout. PageView aborts the
+ * in-flight request whenever the selection changes, and that signal has to
+ * survive: it is how an abandoned request is told apart from a failed one.
+ */
+function pageSignal(signal?: AbortSignal): AbortSignal {
+	const timeout = AbortSignal.timeout(PAGE_TIMEOUT_MS);
+	return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
 /** Builds the query string shared by every data endpoint. */
 function windowQuery(range: string, period: string, namespace = ''): string {
 	const q = new URLSearchParams();
@@ -119,18 +153,47 @@ export const api = {
 	identity: () => request<Identity>('/api/identity'),
 	health: () => request<{ ok: boolean; credentials: boolean }>('/api/health'),
 
+<<<<<<< HEAD
 	page: (id: string, range: string, period: string, signal?: AbortSignal, namespace = '') =>
 		request<Payload>(`/api/page/${id}${windowQuery(range, period, namespace)}`, { signal }),
+=======
+	page: (id: string, range: string, period: string, signal?: AbortSignal) =>
+		request<Payload>(
+			`/api/page/${id}${windowQuery(range, period)}`,
+			{ signal: pageSignal(signal) },
+			PAGE_TIMEOUT_MS
+		),
+>>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 
 	panel: (id: string, range: string, period: string, signal?: AbortSignal) =>
-		request<Payload>(`/api/panel/${id}${windowQuery(range, period)}`, { signal }),
+		request<Payload>(
+			`/api/panel/${id}${windowQuery(range, period)}`,
+			{ signal: pageSignal(signal) },
+			PAGE_TIMEOUT_MS
+		),
 
 	config: async () => normalizeConfig(await request<Config>('/api/config')),
 
+<<<<<<< HEAD
 	saveConfig: async (cfg: Config) =>
 		normalizeConfig(
 			await request<Config>('/api/config', { method: 'PUT', body: JSON.stringify(cfg) })
 		),
+=======
+	/**
+	 * POST, though it reads: every call sends a real request to a real service.
+	 * Its own timeout is longer than the server's 10s probe budget, so the
+	 * server's answer — which knows *what* failed — wins the race.
+	 */
+	check: () =>
+		request<CheckResult>('/api/check', {
+			method: 'POST',
+			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+		}),
+
+	saveConfig: (cfg: Config) =>
+		request<Config>('/api/config', { method: 'PUT', body: JSON.stringify(cfg) }),
+>>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 
 	discover: (kind: string, prefix = '') => {
 		const q = prefix ? `?prefix=${encodeURIComponent(prefix)}` : '';

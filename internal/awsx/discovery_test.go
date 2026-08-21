@@ -23,35 +23,26 @@ type fakeELB struct {
 	tgPages []*elasticloadbalancingv2.DescribeTargetGroupsOutput
 	lbPages []*elasticloadbalancingv2.DescribeLoadBalancersOutput
 
-	// arrived, when set, is closed once both walks have entered. A serial
-	// implementation never closes it and the test dies on the go test timeout;
-	// a concurrent one passes without a sleep anywhere.
-	arrived chan struct{}
+	// barrier, when set (with Add(2)), releases only once both walks have
+	// entered. A serial implementation never gets there and the test dies on the
+	// go test timeout; a concurrent one passes without a sleep anywhere.
+	barrier *sync.WaitGroup
 	tgOnce  sync.Once
 	lbOnce  sync.Once
 
 	mu      sync.Mutex
-	entered int
 	tgCalls int
 	lbCalls int
 }
 
 // enter records that one of the two walks has started, and blocks until the
-// other has too. Only the first page of each walk is counted.
+// other has too. Only the first page of each walk counts.
 func (f *fakeELB) enter(once *sync.Once) {
-	if f.arrived == nil {
+	if f.barrier == nil {
 		return
 	}
-	once.Do(func() {
-		f.mu.Lock()
-		f.entered++
-		both := f.entered == 2
-		f.mu.Unlock()
-		if both {
-			close(f.arrived)
-		}
-	})
-	<-f.arrived
+	once.Do(f.barrier.Done)
+	f.barrier.Wait()
 }
 
 func (f *fakeELB) DescribeTargetGroups(_ context.Context, _ *elasticloadbalancingv2.DescribeTargetGroupsInput, _ ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeTargetGroupsOutput, error) {
@@ -132,7 +123,9 @@ func TestTargetGroupsAnnotatesWithTheLoadBalancer(t *testing.T) {
 // sequence is felt on the settings page. Both fakes block until the other has
 // been entered, so a serial implementation cannot finish this test.
 func TestTargetGroupsWalksBothListsAtOnce(t *testing.T) {
-	f := &fakeELB{arrived: make(chan struct{})}
+	var barrier sync.WaitGroup
+	barrier.Add(2)
+	f := &fakeELB{barrier: &barrier}
 	if _, err := TargetGroups(context.Background(), f); err != nil {
 		t.Fatal(err)
 	}

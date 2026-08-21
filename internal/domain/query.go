@@ -243,10 +243,77 @@ func (q LogQueries) PodTraffic(w Window) (Query, error) {
 // PodBadStatusSeries counts non-OK responses per bucket and status code. It is
 // a complete aggregate, so summing it yields the honest total that the
 // truncated detail list is compared against.
+//
+// It groups by bucket and status and nothing else, deliberately. It used to
+// carry `path` as a third key that no caller ever read, and that key is what
+// decided whether the total was honest: Insights cuts a stats result at
+// InsightsMaxRows, and the row count here is buckets × statuses × paths. At a
+// 5-minute period over two hours that is 24 × 5 × paths, so around eighty
+// distinct paths — one scanner hitting random URLs — was enough to truncate the
+// chart and the "비정상 응답" count beside it, silently. The per-path breakdown
+// now has its own unbinned query, where the same paths cost one row each.
 func (q LogQueries) PodBadStatusSeries(w Window) (Query, error) {
 	preamble, err := q.accessPreamble()
 	if err != nil {
+<<<<<<< HEAD
 		return Query{}, err
+=======
+		return Query{}, fmt.Errorf("statusField: %w", err)
+	}
+	ns, err := q.namespaceFilter()
+	if err != nil {
+		return Query{}, err
+	}
+	probes, err := q.excludePathFilter()
+	if err != nil {
+		return Query{}, err
+	}
+
+	var b strings.Builder
+	b.WriteString("fields @timestamp\n")
+	b.WriteString(ns)
+	b.WriteString(probes)
+	fmt.Fprintf(&b, "| filter ispresent(%s) and %s\n", status, notInStatuses(status, q.Format.OKStatuses))
+	fmt.Fprintf(&b, "| stats count() as n by bin(%s) as t, %s as status\n", w.Period, status)
+	b.WriteString("| sort t asc")
+	return Query{ID: "pod.badStatus.series", Text: b.String()}, nil
+}
+
+// PodBadStatusByPath counts non-OK responses per status code and path, over the
+// whole window rather than per bucket.
+//
+// The filter is character-for-character the one PodBadStatusSeries and
+// PodBadStatusList use, so all three describe one population. The totals can
+// still differ at the margin — the series drops a bin landing on the window's
+// exclusive end that Insights' inclusive EndTime handed to this query, and this
+// query is the one subject to the row cap below — but never because the two are
+// counting different requests.
+//
+// No limit clause, which is not the same as no limit. Insights caps every
+// result set at InsightsMaxRows, so the `sort n desc` below still decides what
+// survives once (status, path) cardinality passes 10,000 — and it decides by
+// volume, meaning a flood of 404s against random paths eventually pushes a rare
+// 403 row out. That is the failure this ordering was meant to avoid and it is
+// only postponed, not removed: there is no single Insights scan that both
+// enumerates paths and keeps a correct per-code total past the row cap. What
+// the missing `limit N` does buy is the ordinary case, where every code is seen
+// and the cut to a readable number of paths happens in Go, per status code,
+// after all of them have been. When the cap is reached the caller says so —
+// see warnIfTruncated and the byPath total's basis in panels_logs.go.
+//
+// Dropping bin() is what makes an uncapped stats affordable at all: one row per
+// (status, path) rather than one per (bucket, status, path).
+// The window is not a parameter: without bin() nothing here varies with it, and
+// the runner scopes every query to the window when it starts it.
+func (q LogQueries) PodBadStatusByPath() (Query, error) {
+	status, err := q.processedField(q.Format.StatusField)
+	if err != nil {
+		return Query{}, fmt.Errorf("statusField: %w", err)
+	}
+	path, err := q.processedField(q.Format.PathField)
+	if err != nil {
+		return Query{}, fmt.Errorf("pathField: %w", err)
+>>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 	}
 	ns, err := q.namespaceFilter()
 	if err != nil {
@@ -261,10 +328,20 @@ func (q LogQueries) PodBadStatusSeries(w Window) (Query, error) {
 	b.WriteString(preamble)
 	b.WriteString(ns)
 	b.WriteString(probes)
+<<<<<<< HEAD
 	fmt.Fprintf(&b, "| filter ispresent(status) and %s\n", notInStatuses("status", q.Format.OKStatuses))
 	fmt.Fprintf(&b, "| stats count() as n by bin(%s) as t, status, path\n", w.Period)
 	b.WriteString("| sort t asc")
 	return Query{ID: "pod.badStatus.series", Text: b.String()}, nil
+=======
+	fmt.Fprintf(&b, "| filter ispresent(%s) and %s\n", status, notInStatuses(status, q.Format.OKStatuses))
+	// max(@timestamp) rather than a sort: the caller wants the newest hit per
+	// group, and Insights renders @timestamp fixed-width so the comparison that
+	// picks it needs no parse.
+	fmt.Fprintf(&b, "| stats count() as n, max(@timestamp) as lastTs by %s as status, %s as path\n", status, path)
+	b.WriteString("| sort n desc")
+	return Query{ID: "pod.badStatus.byPath", Text: b.String()}, nil
+>>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 }
 
 // PodBadStatusList returns the most recent non-OK responses, newest first.
@@ -366,18 +443,66 @@ func (q LogQueries) PodErrorList(w Window, limit int) (Query, error) {
 func (q LogQueries) levelFilter() (string, error) {
 	var b strings.Builder
 	// Normalise into two buckets so the series has a stable set of keys.
+<<<<<<< HEAD
 	b.WriteString("| fields tolower(rawLevel) as lvl, dashboardMessage as raw\n")
 	b.WriteString("| filter lvl in ['error', 'err', 'fatal', 'panic', 'warn', 'warning']\n")
 	b.WriteString("    or (lvl = '' and not ispresent(status) and raw like /(?i)\\b(error|fatal|panic|warn|warning|oomkilled)\\b/)\n")
 	b.WriteString("| fields if(lvl in ['warn', 'warning'] or (lvl = '' and not ispresent(status) and raw like /(?i)\\b(warn|warning)\\b/), 'warn', 'error') as level\n")
+=======
+	//
+	// The message field is matched in place rather than aliased: PodErrorList
+	// already selects it by name, and Logs Insights refuses to compile a query
+	// that both selects a field and re-aliases it.
+	b.WriteString("| fields tolower(rawLevel) as lvl\n")
+	b.WriteString("| filter lvl in ['error', 'err', 'fatal', 'panic', 'warn', 'warning']\n")
+	fmt.Fprintf(&b, "    or (lvl = '' and %s like /(?i)\\b(error|fatal|panic|warn|warning|oomkilled)\\b/)\n", msg)
+	fmt.Fprintf(&b, "| fields (lvl in ['warn', 'warning'] or (lvl = '' and %s like /(?i)\\b(warn|warning)\\b/)) as isWarn\n", msg)
+	// if(), not a ternary: Logs Insights has no `? :` and fails at the lexer.
+	b.WriteString("| fields if(isWarn, 'warn', 'error') as level\n")
+>>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 	return b.String(), nil
 }
 
 func (q LogQueries) accessFields() ([]string, error) {
+<<<<<<< HEAD
 	return []string{
 		"kubernetes.pod_name as pod", "app", "method", "path",
 		"requestTarget", "status", "latencyMs", "clientIp",
 	}, nil
+=======
+	// The three fixed ones come from the Kubernetes envelope, not from the
+	// application's own log line, so they are present whatever an operator has
+	// or has not named in the log format. That is what lets the panel offer a
+	// row detail unconditionally instead of only where a User-Agent field
+	// happens to be configured. PodErrorList already selects `container` under
+	// this name.
+	out := []string{
+		"kubernetes.pod_name as pod",
+		"kubernetes.container_name as container",
+		"kubernetes.namespace_name as namespace",
+	}
+	for _, spec := range []struct {
+		name, alias string
+	}{
+		{q.Format.AppField, "app"},
+		{q.Format.MethodField, "method"},
+		{q.Format.PathField, "path"},
+		{q.Format.StatusField, "status"},
+		{q.Format.LatencyField, "latencyMs"},
+		{q.Format.ClientIPField, "clientIp"},
+		{q.Format.UserAgentField, "userAgent"},
+	} {
+		if spec.name == "" {
+			continue
+		}
+		f, err := q.processedField(spec.name)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, fmt.Sprintf("%s as %s", f, spec.alias))
+	}
+	return out, nil
+>>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 }
 
 // notInStatuses renders the healthy-code exclusion. An empty set means every
@@ -416,22 +541,37 @@ func (q WAFQueries) ActionSeries(w Window) Query {
 	}
 }
 
-// ByMethod counts requests per HTTP method.
+// Every breakdown groups by action as well as by its own key, and carries the
+// newest timestamp in each group.
+//
+// Without the action, "this path was requested 4,000 times" says nothing about
+// whether those requests reached the application — the allowed and the blocked
+// were summed into one number. Grouping is what splits them, and max(@timestamp)
+// per (key, action) is what lets the caller say which action was the most
+// recent one for that key.
+//
+// The cost is unchanged: the same scan of the same window, one more grouping
+// key. What does change is the row count, which is why the callers raise the
+// limit — see actionFanout.
+func breakdownStats(by string) string {
+	return "stats count() as n, max(@timestamp) as lastTs by " + by + ", action\n| sort n desc\n"
+}
+
+// ByMethod counts requests per HTTP method and action.
 func (q WAFQueries) ByMethod() Query {
 	return Query{
 		ID:   "waf.byMethod",
-		Text: "stats count() as n by httpRequest.httpMethod as method\n| sort n desc",
+		Text: breakdownStats("httpRequest.httpMethod as method"),
 	}
 }
 
-// ByPath counts requests per URI and query string. The two are reported as
-// separate columns rather than concatenated so the UI can offer a copy button
-// for each.
+// ByPath counts requests per URI, query string and action. The URI and the args
+// are reported as separate columns rather than concatenated so the UI can offer
+// a copy button for each.
 func (q WAFQueries) ByPath(limit int) Query {
 	return Query{
 		ID: "waf.byPath",
-		Text: "stats count() as n by httpRequest.uri as uri, httpRequest.args as args\n" +
-			"| sort n desc\n" +
+		Text: breakdownStats("httpRequest.uri as uri, httpRequest.args as args") +
 			fmt.Sprintf("| limit %d", limit),
 		Limit: limit,
 	}
@@ -449,14 +589,47 @@ func (q WAFQueries) Blocked(limit int) Query {
 	}
 }
 
-// BlockedList returns individual blocked requests, newest first.
-func (q WAFQueries) BlockedList(limit int) Query {
+// RecentList returns individual requests, newest first, each with the action
+// the WAF took on it.
+//
+// It is deliberately not filtered to blocked requests. What a rule blocked is
+// already summarised by Blocked; what this answers is the other question — is
+// traffic arriving at all, and is it getting through — which a list of blocks
+// alone cannot, because an empty one means either "nothing was blocked" or
+// "nothing arrived".
+//
+// Beyond what the table shows, it selects what an operator asks next about one
+// row: which client sent it, calling itself what, and what the WAF actually
+// did about it. Those are extra fields on a scan that already happened, so they
+// cost nothing — Insights bills for bytes read, and the record was read whole
+// either way.
+//
+// What it does not select is @message. The raw WAF record is roughly a
+// kilobyte with its header array and rule-group lists, against a couple of
+// hundred bytes for the fields below, and this list is refetched on every poll.
+// Naming the fields is what keeps a detail view from becoming a download.
+func (q WAFQueries) RecentList(limit int) Query {
+	// The capture is named apart from the column it feeds, and aliased into it
+	// below.
+	//
+	// Logs Insights reads a name in `fields` as a definition rather than a
+	// selection, so listing the parse's own field there defines it twice and the
+	// query is rejected before it runs: "Ephemeral field is already defined".
+	// It is the same rule that stops the pod error list from re-aliasing the
+	// message field it already selected — a query may use an ephemeral field
+	// freely, and may alias it into a new name, but may not name it again.
+	//
+	// The header name is a constant, so the error is impossible and dropping it
+	// keeps this signature free of one that no caller could act on.
+	ua, _ := headerParse("User-Agent", "uaCapture")
 	return Query{
-		ID: "waf.blocked.list",
-		Text: "fields @timestamp, terminatingRuleId as rule, httpRequest.clientIp as clientIp,\n" +
+		ID: "waf.recent.list",
+		Text: ua + "\n" +
+			"| fields @timestamp, action, terminatingRuleId as rule, terminatingRuleType as ruleType,\n" +
+			"       responseCodeSent as responseCode, uaCapture as userAgent,\n" +
+			"       httpRequest.clientIp as clientIp,\n" +
 			"       httpRequest.country as country, httpRequest.httpMethod as method,\n" +
 			"       httpRequest.uri as uri, httpRequest.args as args\n" +
-			"| filter action = 'BLOCK'\n" +
 			"| sort @timestamp desc\n" +
 			fmt.Sprintf("| limit %d", limit),
 		Limit: limit,
@@ -468,7 +641,8 @@ func (q WAFQueries) BlockedList(limit int) Query {
 // without escaping surprises.
 var headerNameRe = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+.^_` + "`" + `|~-]+$`)
 
-// ByHeader counts the distinct values of one request header.
+// headerParse renders the command that lifts one request header out of a WAF
+// record and binds it to alias.
 //
 // WAF stores headers as an array of {name, value} objects. Logs Insights cannot
 // group by an array element, and indexing by position (headers.0.value) is
@@ -476,17 +650,29 @@ var headerNameRe = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+.^_` + "`" + `|~-]+$`)
 // of the raw record with a parse. The reference implementation solved the same
 // problem with a SQLite json_each cross join over every stored row, which is
 // the single most expensive query it ran.
-func (q WAFQueries) ByHeader(name string, limit int) (Query, error) {
+//
+// Both the per-header breakdown and the recent-request list need this, and they
+// need it to behave identically — one shape of regex to reason about when a
+// header stops coming through.
+func headerParse(name, alias string) (string, error) {
 	if !headerNameRe.MatchString(name) {
-		return Query{}, fmt.Errorf("invalid header name %q", name)
+		return "", fmt.Errorf("invalid header name %q", name)
 	}
-	pattern := fmt.Sprintf(`"name":"(?i)%s","value":"(?<headerValue>[^"]*)"`, regexp.QuoteMeta(name))
+	return fmt.Sprintf(`parse @message /"name":"(?i)%s","value":"(?<%s>[^"]*)"/`,
+		regexp.QuoteMeta(name), alias), nil
+}
+
+// ByHeader counts the distinct values of one request header, per action.
+func (q WAFQueries) ByHeader(name string, limit int) (Query, error) {
+	parse, err := headerParse(name, "headerValue")
+	if err != nil {
+		return Query{}, err
+	}
 	return Query{
 		ID: "waf.byHeader." + strings.ToLower(name),
-		Text: fmt.Sprintf("parse @message /%s/\n", pattern) +
+		Text: parse + "\n" +
 			"| filter ispresent(headerValue)\n" +
-			"| stats count() as n by headerValue as value\n" +
-			"| sort n desc\n" +
+			"| " + breakdownStats("headerValue as value") +
 			fmt.Sprintf("| limit %d", limit),
 		Limit: limit,
 	}, nil

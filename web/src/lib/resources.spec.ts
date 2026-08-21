@@ -89,6 +89,14 @@ describe('matchesQuery', () => {
 		expect(matchesQuery(checkout, 'CHECKOUT')).toBe(true);
 		expect(matchesQuery(checkout, '   ')).toBe(true);
 	});
+
+	it('searches every discovered attribute, not one kind’s', () => {
+		// The searched fields used to be an allowlist written for target groups
+		// and RDS proxies, so a Web ACL could not be found by its scope at all.
+		const acl: Resource = { id: 'edge-waf', name: 'edge-waf', extra: { scope: 'CLOUDFRONT' } };
+		expect(matchesQuery(acl, 'cloudfront')).toBe(true);
+		expect(matchesQuery(acl, 'regional')).toBe(false);
+	});
 });
 
 describe('filterGroups', () => {

@@ -103,16 +103,27 @@ describe('timeRange', () => {
 		expect(timeRange.refreshSeconds).toBe(60);
 	});
 
-	it('drops the refresh parameter when auto-refresh is off', () => {
+	it('keeps a manual choice through the URL rather than snapping back to the default', () => {
 		timeRange.refreshSeconds = 0;
-		expect(timeRange.toSearchParams().has('refresh')).toBe(false);
+		const params = timeRange.toSearchParams();
+		expect(params.get('refresh')).toBe('0');
+
+		timeRange.refreshSeconds = 300;
+		timeRange.fromSearchParams(params);
+		expect(timeRange.refreshSeconds).toBe(0);
+	});
+
+	it('falls back to the default when the URL says nothing', () => {
+		timeRange.refreshSeconds = 300;
+		timeRange.fromSearchParams(new URLSearchParams('range=1h&period=1m'));
+		expect(timeRange.refreshSeconds).toBe(60);
 	});
 
 	it('ignores nonsense in the URL instead of adopting it', () => {
 		timeRange.fromSearchParams(new URLSearchParams('range=99h&period=3s&refresh=7'));
 		expect(timeRange.range).toBe('1h');
 		expect(timeRange.periods).toContain(timeRange.period);
-		expect(timeRange.refreshSeconds).toBe(0);
+		expect(timeRange.refreshSeconds).toBe(60);
 	});
 
 	it('bumps a nonce so a manual refresh refetches the same window', () => {

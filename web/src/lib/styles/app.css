@@ -115,7 +115,7 @@ button {
 .stack {
 	display: flex;
 	flex-direction: column;
-	gap: 16px;
+	gap: 12px;
 }
 
 .row {
@@ -127,20 +127,27 @@ button {
 
 .grid {
 	display: grid;
-	gap: 16px;
-	grid-template-columns: repeat(auto-fit, minmax(min(100%, 30rem), 1fr));
+	gap: 10px;
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 26rem), 1fr));
 	/* Table panels span the full width, which would otherwise leave a hole
 	   beside the panel before them. Dense packing pulls the next half-width
 	   panel up into it. */
 	grid-auto-flow: dense;
 }
 
+/*
+ * Cards carry no shadow by default.
+ *
+ * On a screen where every panel is raised, nothing is: the shadow stops being
+ * a signal and becomes texture. Ordinary traffic therefore sits flat in the
+ * background layer, and only a panel holding something wrong is lifted out of
+ * it — see .panel.alarm in PanelCard.
+ */
 .card {
 	background: var(--bg-elevated);
 	border: 1px solid var(--separator);
 	border-radius: var(--radius-card);
-	box-shadow: var(--shadow-card);
-	padding: 16px;
+	padding: 10px;
 }
 
 .muted {
@@ -175,10 +182,11 @@ table {
 
 th,
 td {
-	padding: 7px 10px;
+	padding: 3px 8px;
 	text-align: left;
 	vertical-align: top;
 	border-bottom: 1px solid var(--separator);
+	font-size: 12.5px;
 	/* No nowrap: a long path wraps within its column. */
 	white-space: normal;
 	overflow-wrap: anywhere;
@@ -190,9 +198,38 @@ th {
 	z-index: 1;
 	background: var(--bg-secondary);
 	font-weight: 600;
-	font-size: 12px;
+	font-size: 11.5px;
 	color: var(--label-secondary);
 	letter-spacing: 0.01em;
+	padding: 4px 8px;
+}
+
+/* Sorting is a header control, not a separate widget: the button fills the
+   cell so the whole header is the hit target. */
+th button.sort {
+	display: flex;
+	align-items: baseline;
+	gap: 3px;
+	width: 100%;
+	border: none;
+	background: transparent;
+	padding: 0;
+	font: inherit;
+	color: inherit;
+	text-align: inherit;
+}
+
+th.numeric button.sort {
+	justify-content: flex-end;
+}
+
+th button.sort:hover {
+	color: var(--label-primary);
+}
+
+th button.sort .arrow {
+	font-size: 9px;
+	color: var(--accent);
 }
 
 tbody tr:last-child td {
@@ -228,8 +265,15 @@ td.numeric [data-value] {
 	border: 1px solid var(--separator);
 	border-radius: var(--radius-control);
 	color: var(--label-primary);
-	padding: 5px 10px;
-	font-size: 13px;
+	padding: 4px 8px;
+	font-size: 12.5px;
+}
+
+/* Click feedback: an instant background change, no motion. A press is a
+   state, not a movement — the colour appears on the down-frame and leaves on
+   release, so there is nothing to transition and nothing to interrupt. */
+button:active {
+	background: var(--fill-secondary);
 }
 
 .segmented {
@@ -283,13 +327,69 @@ td.numeric [data-value] {
 
 .warning {
 	display: flex;
-	gap: 8px;
-	padding: 8px 10px;
+	gap: 6px;
+	padding: 5px 8px;
 	border-radius: var(--radius-control);
 	background: color-mix(in oklch, var(--system-orange) 12%, var(--bg-elevated));
 	color: var(--label-primary);
-	font-size: 12.5px;
+	font-size: 12px;
 	overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------------------
+ * Motion
+ *
+ * Two effects only, both short and both composited. A value that changed
+ * flashes once; a refresh in flight spins. Nothing slides, nothing eases into
+ * place, and nothing animates a property that would force layout or repaint
+ * the panel behind it.
+ * ------------------------------------------------------------------------- */
+
+/*
+ * The flash is an overlay whose opacity animates — not the element's own
+ * background-color. Animating a colour repaints the tile and everything
+ * composited with it on every frame; animating opacity on a promoted layer
+ * does not touch paint at all.
+ */
+@keyframes value-flash {
+	from {
+		opacity: 0.35;
+	}
+	to {
+		opacity: 0;
+	}
+}
+
+.flash {
+	position: relative;
+}
+
+.flash::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	border-radius: inherit;
+	background: currentcolor;
+	opacity: 0;
+	pointer-events: none;
+	animation: value-flash var(--dur-quick) var(--ease-out);
+}
+
+@keyframes spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.spinner {
+	display: inline-block;
+	width: 9px;
+	height: 9px;
+	border: 1.5px solid var(--label-quaternary);
+	border-top-color: var(--accent);
+	border-radius: 50%;
+	animation: spin var(--dur-spin) linear infinite;
+	flex: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -298,5 +398,13 @@ td.numeric [data-value] {
 	*::after {
 		animation-duration: 0.01ms !important;
 		transition-duration: 0.01ms !important;
+	}
+
+	/* An infinite spinner cannot simply be shortened to nothing — it would
+	   flicker. It stops, and the disabled button still says a refresh is in
+	   flight. */
+	.spinner {
+		animation: none !important;
+		border-top-color: var(--label-quaternary);
 	}
 }

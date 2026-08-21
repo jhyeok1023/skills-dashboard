@@ -109,9 +109,6 @@ type discoveryResponse struct {
 	// Truncated reports that the page cap was reached with pages still waiting,
 	// so the resource the operator is hunting for may simply not be on the list.
 	Truncated bool `json:"truncated,omitempty"`
-	// ElapsedMs is how long the listing took, so a settings page that felt slow
-	// can say whether it actually was. Absent when the cache answered.
-	ElapsedMs int64 `json:"elapsedMs,omitempty"`
 	// Partial names a scope that failed without failing the whole call. Today
 	// only the CLOUDFRONT web ACL listing, which is discarded so a missing
 	// permission cannot hide the regional ACLs the operator can actually use —
@@ -123,9 +120,8 @@ type discoveryResponse struct {
 // discoveryResult is what one listing produced, before it becomes a response.
 // It is what the cache stores, so a cached answer keeps its caveats.
 type discoveryResult struct {
-	Resources []awsx.Resource
-	Truncated bool
-	Partial   []string
+	awsx.Listing
+	Partial []string
 }
 
 func (s *Service) handleDiscovery(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +139,6 @@ func (s *Service) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), discoveryTimeout)
 	defer cancel()
 
-	started := time.Now()
 	res, err := s.discover(ctx, kind, prefix)
 	if err != nil {
 		if err == errUnknownKind {
@@ -166,7 +161,6 @@ func (s *Service) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 		Kind:      kind,
 		Resources: res.Resources,
 		Truncated: res.Truncated,
-		ElapsedMs: time.Since(started).Milliseconds(),
 		Partial:   res.Partial,
 	})
 }
@@ -218,80 +212,78 @@ func (s *Service) cachedDiscovery(
 	})
 }
 
-// listing adapts an awsx walk to a discoveryResult.
+// listing adapts an awsx walk to a discoveryResult. The error is passed
+// straight through: on a failure the caller ignores the value anyway.
 func listing(l awsx.Listing, err error) (discoveryResult, error) {
-	if err != nil {
-		return discoveryResult{}, err
-	}
-	return discoveryResult{Resources: l.Resources, Truncated: l.Truncated}, nil
+	return discoveryResult{Listing: l}, err
 }
 
 func (s *Service) discover(ctx context.Context, kind, prefix string) (discoveryResult, error) {
+	var load func(context.Context) (discoveryResult, error)
+
+	switch kind {
+	case "targetgroups":
+		load = func(ctx context.Context) (discoveryResult, error) {
+			return listing(awsx.TargetGroups(ctx, s.Clients.ELB))
+		}
+	case "loadbalancers":
+		load = func(ctx context.Context) (discoveryResult, error) {
+			return listing(awsx.LoadBalancers(ctx, s.Clients.ELB))
+		}
+	case "loggroups":
+		load = func(ctx context.Context) (discoveryResult, error) {
+			return listing(awsx.LogGroups(ctx, s.Clients.Logs, prefix))
+		}
+	case "waf-loggroups":
+		// WAF log groups are listed from the WAF region. A CLOUDFRONT-scoped
+		// web ACL writes only into us-east-1, so listing the working region
+		// returns nothing and reads as "this account has no WAF logging".
+		load = func(ctx context.Context) (discoveryResult, error) {
+			return listing(awsx.LogGroups(ctx, s.Clients.LogsGlobal, prefix))
+		}
+	case "rdsproxies":
+		load = func(ctx context.Context) (discoveryResult, error) {
+			return listing(awsx.RDSProxies(ctx, s.Clients.RDS))
+		}
+	case "clusters":
+		load = func(ctx context.Context) (discoveryResult, error) {
+			return listing(awsx.Clusters(ctx, s.Clients.EKS))
+		}
+	case "webacls":
+		load = s.webACLs
+	default:
+		return discoveryResult{}, errUnknownKind
+	}
+
 	// The key names the regions the clients are pointed at rather than the one
 	// the config records, which is a note about the credentials and does not
 	// decide where a call lands. A listing from us-east-1 and one from the
 	// working region must not be able to answer for each other.
 	key := "discovery|" + kind + "|" + prefix + "|" + s.region() + "|" + s.wafRegion()
-	run := func(load func(context.Context) (discoveryResult, error)) (discoveryResult, error) {
-		return s.cachedDiscovery(ctx, key, kind, prefix, load)
-	}
+	return s.cachedDiscovery(ctx, key, kind, prefix, load)
+}
 
-	switch kind {
-	case "targetgroups":
-		return run(func(ctx context.Context) (discoveryResult, error) {
-			return listing(awsx.TargetGroups(ctx, s.Clients.ELB))
-		})
-	case "loadbalancers":
-		return run(func(ctx context.Context) (discoveryResult, error) {
-			return listing(awsx.LoadBalancers(ctx, s.Clients.ELB))
-		})
-	case "loggroups":
-		return run(func(ctx context.Context) (discoveryResult, error) {
-			return listing(awsx.LogGroups(ctx, s.Clients.Logs, prefix))
-		})
-	case "waf-loggroups":
-		// WAF log groups are listed from the WAF region. A CLOUDFRONT-scoped
-		// web ACL writes only into us-east-1, so listing the working region
-		// returns nothing and reads as "this account has no WAF logging".
-		return run(func(ctx context.Context) (discoveryResult, error) {
-			return listing(awsx.LogGroups(ctx, s.Clients.LogsGlobal, prefix))
-		})
-	case "rdsproxies":
-		return run(func(ctx context.Context) (discoveryResult, error) {
-			return listing(awsx.RDSProxies(ctx, s.Clients.RDS))
-		})
-	case "clusters":
-		return run(func(ctx context.Context) (discoveryResult, error) {
-			return listing(awsx.Clusters(ctx, s.Clients.EKS))
-		})
-	case "webacls":
-		// Both scopes are listed: a regional ACL fronting an ALB and a
-		// CLOUDFRONT one are equally likely, and the CLOUDFRONT list only
-		// exists in us-east-1.
-		return run(func(ctx context.Context) (discoveryResult, error) {
-			regional, err := awsx.WebACLs(ctx, s.Clients.WAF, waftypes.ScopeRegional)
-			if err != nil {
-				return discoveryResult{}, err
-			}
-			out := discoveryResult{Resources: regional.Resources, Truncated: regional.Truncated}
-
-			global, err := awsx.WebACLs(ctx, s.Clients.WAFGlobal, waftypes.ScopeCloudfront)
-			if err != nil {
-				// A missing CLOUDFRONT permission must not hide the regional
-				// ACLs the operator can actually use — but it is reported
-				// rather than swallowed, because this branch also fires when
-				// wafRegion equals the working region (awsx.New aliases the
-				// global client to the regional one, and a CLOUDFRONT-scoped
-				// call outside us-east-1 fails), which would otherwise make a
-				// misconfigured wafRegion completely invisible.
-				out.Partial = append(out.Partial, fmt.Sprintf("CLOUDFRONT 스코프 조회 실패: %v", err))
-				return out, nil
-			}
-			out.Resources = append(out.Resources, global.Resources...)
-			out.Truncated = out.Truncated || global.Truncated
-			return out, nil
-		})
-	default:
-		return discoveryResult{}, errUnknownKind
+// webACLs lists both scopes: a regional ACL fronting an ALB and a CLOUDFRONT
+// one are equally likely, and the CLOUDFRONT list only exists in us-east-1.
+func (s *Service) webACLs(ctx context.Context) (discoveryResult, error) {
+	regional, err := awsx.WebACLs(ctx, s.Clients.WAF, waftypes.ScopeRegional)
+	if err != nil {
+		return discoveryResult{}, err
 	}
+	out := discoveryResult{Listing: regional}
+
+	global, err := awsx.WebACLs(ctx, s.Clients.WAFGlobal, waftypes.ScopeCloudfront)
+	if err != nil {
+		// A missing CLOUDFRONT permission must not hide the regional ACLs the
+		// operator can actually use — but it is reported rather than swallowed,
+		// because this branch also fires when wafRegion equals the working
+		// region (awsx.New aliases the global client to the regional one, and a
+		// CLOUDFRONT-scoped call outside us-east-1 fails), which would
+		// otherwise make a misconfigured wafRegion completely invisible.
+		out.Partial = append(out.Partial, fmt.Sprintf("CLOUDFRONT 스코프 조회 실패: %v", err))
+		return out, nil
+	}
+	out.Resources = append(out.Resources, global.Resources...)
+	out.Truncated = out.Truncated || global.Truncated
+	return out, nil
 }

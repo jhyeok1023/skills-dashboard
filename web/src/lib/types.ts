@@ -19,6 +19,8 @@ export interface Series {
 	label: string;
 	unit: Unit;
 	color?: string;
+	/** '', 'dashed' or 'dotted'. Absent means a solid line. */
+	dash?: string;
 	values: Point[];
 }
 
@@ -40,6 +42,14 @@ export interface Column {
 	copyable?: boolean;
 	mono?: boolean;
 	numeric?: boolean;
+	/**
+	 * Shown only in a row's expanded detail, never as a column.
+	 *
+	 * It also decides which tables offer an expander at all: a table that
+	 * declares none has nothing to reveal, so an aggregate row — already its own
+	 * summary — stays inert without the view knowing any panel by name.
+	 */
+	detail?: boolean;
 }
 
 export type Row = Record<string, unknown>;
@@ -134,6 +144,8 @@ export interface LogFormat {
 	pathField: string;
 	levelField: string;
 	clientIpField: string;
+	/** Empty unless the operator names it; an access log has one only if the application wrote it. */
+	userAgentField: string;
 	textPattern: string;
 	levelPattern: string;
 	namespace: string;
@@ -156,6 +168,26 @@ export interface Config {
 	wafHeaders: string[];
 	logFormat: LogFormat;
 	limits: Meta['limits'];
+	check: HealthCheck;
+}
+
+/** The one endpoint the dashboard requests itself. See internal/api/check.go. */
+export interface HealthCheck {
+	url: string;
+	/** 0 means any 2xx counts as healthy. */
+	expectStatus: number;
+}
+
+/** One completed probe. A failed probe is still a completed probe. */
+export interface CheckResult {
+	url: string;
+	ok: boolean;
+	status?: number;
+	elapsedMs: number;
+	at: string;
+	error?: string;
+	/** What the status was compared against, in words. */
+	expect: string;
 }
 
 export interface Resource {
@@ -170,8 +202,6 @@ export interface DiscoveryResponse {
 	resources: Resource[];
 	/** The page cap stopped the walk, so the list may be missing entries. */
 	truncated?: boolean;
-	/** How long the listing took. Absent when the server's cache answered. */
-	elapsedMs?: number;
 	/** Scopes that failed without failing the whole call, in words. */
 	partial?: string[];
 }

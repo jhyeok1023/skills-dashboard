@@ -18,6 +18,9 @@
 		{ href: resolve('/'), match: '/', label: '개요' },
 		{ href: resolve('/logs/pod'), match: '/logs/pod', label: '팟 로그' },
 		{ href: resolve('/logs/waf'), match: '/logs/waf', label: 'WAF' },
+		// No badge in the bar itself: a badge would have to probe on every page
+		// load, and that is traffic the operator did not ask to send.
+		{ href: resolve('/check'), match: '/check', label: '트래픽 점검' },
 		{ href: resolve('/infra/targetgroup'), match: '/infra/targetgroup', label: '타겟 그룹' },
 		{ href: resolve('/infra/kubernetes'), match: '/infra/kubernetes', label: '팟 · 노드' },
 		{ href: resolve('/infra/database'), match: '/infra/database', label: 'RDS Proxy' },
@@ -106,24 +109,35 @@
 </div>
 
 <style>
+	/*
+	 * A fixed chrome with a scrolling data area, rather than one long page.
+	 *
+	 * The nav stays put and the page's own header can stick to the top of the
+	 * data area without having to know how tall the nav happens to be — which
+	 * it does not, since the links wrap onto a second row when the viewport is
+	 * narrow.
+	 */
 	.shell {
-		min-height: 100vh;
+		height: 100dvh;
 		display: flex;
 		flex-direction: column;
+		overflow: hidden;
 	}
 
 	.topbar {
-		position: sticky;
-		top: 0;
-		z-index: 10;
+		z-index: var(--z-topbar);
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
-		gap: 8px 16px;
-		padding: 10px 20px;
-		background: color-mix(in oklch, var(--bg-primary) 88%, transparent);
-		backdrop-filter: saturate(180%) blur(16px);
+		gap: 6px 16px;
+		padding: 7px 16px;
+		/* Opaque on purpose. A translucent bar needs backdrop-filter, and that
+		   is a full-width blur of everything behind it, recomputed on every
+		   scrolled frame — paid for continuously, to read the panel edges
+		   sliding underneath. */
+		background: var(--bg-primary);
 		border-bottom: 1px solid var(--separator);
+		flex: none;
 	}
 
 	.brand {
@@ -186,16 +200,23 @@
 		width: 100%;
 		max-width: 1600px;
 		margin: 0 auto;
-		padding: 20px;
+		padding: 0 16px 16px;
 		min-width: 0;
+		min-height: 0;
+		/* The data area is what scrolls. Sideways it does not: a wide table
+		   scrolls inside its own container, as it always has. */
+		overflow-y: auto;
+		overflow-x: hidden;
+		/* No rubber-banding past the ends of the list. */
+		overscroll-behavior-y: contain;
 	}
 
 	@media (max-width: 640px) {
 		.topbar {
-			padding: 10px 12px;
+			padding: 7px 10px;
 		}
 		main {
-			padding: 14px 12px;
+			padding: 0 10px 10px;
 		}
 	}
 </style>

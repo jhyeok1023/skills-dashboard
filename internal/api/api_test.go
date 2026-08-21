@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -127,6 +128,11 @@ func classify(q string) string {
 		return "traffic"
 	case strings.Contains(q, "not in [200, 201]") && strings.Contains(q, "sort @timestamp desc"):
 		return "badStatusList"
+	// Before badStatusSeries, which the same filter would otherwise claim. The
+	// two differ by what they group by: the breakdown carries a lastTs and no
+	// bin(), the series carries a bin() and no lastTs.
+	case strings.Contains(q, "not in [200, 201]") && strings.Contains(q, "lastTs"):
+		return "badStatusByPath"
 	case strings.Contains(q, "not in [200, 201]"):
 		return "badStatusSeries"
 	case strings.Contains(q, "as t, level"):
@@ -135,12 +141,17 @@ func classify(q string) string {
 		return "errorList"
 	case strings.Contains(q, "as t, action"):
 		return "wafAction"
+	// The per-request lists come first, exactly as badStatusList and errorList
+	// do above. RecentList selects a method, a uri and an args of its own, so
+	// every breakdown case below would claim it first and hand the WAF traffic
+	// panel a breakdown's rows — which is what used to happen, silently,
+	// because the wafMethod fixture also carries an ALLOW and a BLOCK.
+	case strings.Contains(q, "terminatingRuleId as rule") && strings.Contains(q, "sort @timestamp desc"):
+		return "wafRecentList"
 	case strings.Contains(q, "httpMethod as method"):
 		return "wafMethod"
 	case strings.Contains(q, "uri as uri, httpRequest.args"):
 		return "wafPath"
-	case strings.Contains(q, "terminatingRuleId as rule") && strings.Contains(q, "sort @timestamp desc"):
-		return "wafBlockedList"
 	case strings.Contains(q, "terminatingRuleId as rule"):
 		return "wafBlocked"
 	case strings.Contains(q, "parse @message"):
@@ -208,9 +219,23 @@ func rowsFor(kind string) [][]logtypes.ResultField {
 		}
 	case "badStatusSeries":
 		// 1284 non-OK responses in total, far more than the list can carry.
+		// No path: the series groups by bucket and status only, and grouping by
+		// anything unbounded here is what used to truncate it.
 		return [][]logtypes.ResultField{
-			{f("t", bucket(0)), f("status", "503"), f("path", "/healthcheck"), f("n", "800")},
-			{f("t", bucket(1)), f("status", "404"), f("path", "/v1/user"), f("n", "484")},
+			{f("t", bucket(0)), f("status", "503"), f("n", "800")},
+			{f("t", bucket(1)), f("status", "404"), f("n", "484")},
+		}
+	case "badStatusByPath":
+		// The same 1284, split by path. 404 outnumbers 503 in row count while
+		// 503 outweighs it in requests, which is what makes the ordering and the
+		// per-code path cut worth asserting. One row carries no path at all: it
+		// still counts toward its code and must not become a listed path.
+		return [][]logtypes.ResultField{
+			{f("status", "503"), f("path", "/healthcheck"), f("n", "780"), f("lastTs", "2026-08-10 09:44:00.000")},
+			{f("status", "404"), f("path", "/v1/user"), f("n", "300"), f("lastTs", "2026-08-10 09:43:00.000")},
+			{f("status", "404"), f("path", "/favicon.ico"), f("n", "120"), f("lastTs", "2026-08-10 09:42:00.000")},
+			{f("status", "404"), f("path", "/wp-login.php"), f("n", "64"), f("lastTs", "2026-08-10 09:41:00.000")},
+			{f("status", "503"), f("path", ""), f("n", "20"), f("lastTs", "2026-08-10 09:40:00.000")},
 		}
 	case "badStatusList":
 		rows := make([][]logtypes.ResultField, 300)
@@ -218,6 +243,7 @@ func rowsFor(kind string) [][]logtypes.ResultField {
 			rows[i] = []logtypes.ResultField{
 				f("@timestamp", "2026-08-10 09:30:00.000"),
 				f("pod", "api-5cbb6d585d-cr4rd"), f("app", "api"),
+				f("container", "api"), f("namespace", "default"),
 				f("method", "GET"), f("path", "/healthcheck"),
 				f("status", "503"), f("latencyMs", "12.5"), f("clientIp", "10.0.3.123"),
 			}
@@ -244,29 +270,38 @@ func rowsFor(kind string) [][]logtypes.ResultField {
 			{f("t", bucket(0)), f("action", "BLOCK"), f("n", "100")},
 			{f("t", bucket(2)), f("action", "ALLOW"), f("n", "700")},
 		}
+	// The breakdowns arrive one row per (key, action), which is what the panel
+	// builder folds back together. GET appears twice on purpose: an allowed
+	// majority and a blocked tail is the shape the split exists to reveal.
 	case "wafMethod":
 		return [][]logtypes.ResultField{
-			{f("method", "GET"), f("n", "1500")},
-			{f("method", "POST"), f("n", "200")},
+			{f("method", "GET"), f("action", "ALLOW"), f("n", "1400"), f("lastTs", "2026-08-10 09:40:00.000")},
+			{f("method", "GET"), f("action", "BLOCK"), f("n", "100"), f("lastTs", "2026-08-10 09:41:00.000")},
+			{f("method", "POST"), f("action", "ALLOW"), f("n", "200"), f("lastTs", "2026-08-10 09:20:00.000")},
 		}
 	case "wafPath":
 		return [][]logtypes.ResultField{
-			{f("uri", "/v1/user"), f("args", "email=a@b.c"), f("n", "80")},
-			{f("uri", "/healthcheck"), f("args", ""), f("n", "1200")},
+			{f("uri", "/v1/user"), f("args", "email=a@b.c"), f("action", "ALLOW"), f("n", "60"), f("lastTs", "2026-08-10 09:30:00.000")},
+			{f("uri", "/v1/user"), f("args", "email=a@b.c"), f("action", "COUNT"), f("n", "20"), f("lastTs", "2026-08-10 09:35:00.000")},
+			{f("uri", "/healthcheck"), f("args", ""), f("action", "ALLOW"), f("n", "1200"), f("lastTs", "2026-08-10 09:44:00.000")},
 		}
 	case "wafBlocked":
 		return [][]logtypes.ResultField{
 			{f("rule", "sqli"), f("clientIp", "1.2.3.4"), f("country", "KR"), f("n", "60")},
 			{f("rule", "xss"), f("clientIp", "5.6.7.8"), f("country", "US"), f("n", "40")},
 		}
-	case "wafBlockedList":
+	case "wafRecentList":
+		// No responseCode on either row on purpose: a custom response is the
+		// rare case, and the common one — a block that records no code at all —
+		// is what the panel has to answer for without inventing a number.
 		return [][]logtypes.ResultField{
-			{f("@timestamp", "2026-08-10 09:40:00.000"), f("rule", "sqli"), f("clientIp", "1.2.3.4"), f("country", "KR"), f("method", "GET"), f("uri", "/v1/user"), f("args", "email=a@b.c")},
+			{f("@timestamp", "2026-08-10 09:41:00.000"), f("action", "BLOCK"), f("rule", "sqli"), f("ruleType", "MANAGED_RULE_GROUP"), f("clientIp", "1.2.3.4"), f("country", "KR"), f("method", "GET"), f("uri", "/v1/user"), f("args", "email=a@b.c"), f("userAgent", "curl/8.4.0")},
+			{f("@timestamp", "2026-08-10 09:40:00.000"), f("action", "ALLOW"), f("rule", ""), f("ruleType", ""), f("clientIp", "9.9.9.9"), f("country", "JP"), f("method", "GET"), f("uri", "/healthcheck"), f("args", ""), f("userAgent", "kube-probe/1.29")},
 		}
 	case "wafHeader":
 		return [][]logtypes.ResultField{
-			{f("value", "Mozilla/5.0"), f("n", "1100")},
-			{f("value", "curl/8"), f("n", "60")},
+			{f("value", "Mozilla/5.0"), f("action", "ALLOW"), f("n", "1100"), f("lastTs", "2026-08-10 09:44:00.000")},
+			{f("value", "curl/8"), f("action", "BLOCK"), f("n", "60"), f("lastTs", "2026-08-10 09:41:00.000")},
 		}
 	default:
 		return nil
@@ -407,6 +442,23 @@ func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
 	return rec
 }
 
+func post(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+	return rec
+}
+
+func decodeJSON(t *testing.T, rec *httptest.ResponseRecorder, into any) {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), into); err != nil {
+		t.Fatalf("decode: %v\n%s", err, rec.Body.String())
+	}
+}
+
 func decodePayload(t *testing.T, rec *httptest.ResponseRecorder) domain.Payload {
 	t.Helper()
 	if rec.Code != http.StatusOK {
@@ -430,6 +482,20 @@ func findPanel(t *testing.T, p domain.Payload, id string) *domain.Panel {
 	return nil
 }
 
+func statValue(t *testing.T, panel *domain.Panel, key string) float64 {
+	t.Helper()
+	for _, s := range panel.Stats {
+		if s.Key == key {
+			if s.Value == nil {
+				t.Fatalf("panel %q stat %q has no value", panel.ID, key)
+			}
+			return *s.Value
+		}
+	}
+	t.Fatalf("panel %q has no stat %q", panel.ID, key)
+	return 0
+}
+
 // This is the regression line for the defect the rewrite exists to fix: a
 // number shown on an overview disagreeing with the same number on its detail
 // view. Both views are served by the same builder, and here we prove that a
@@ -445,6 +511,8 @@ func TestPanelIsIdenticalWhetherFetchedAloneOrInsideAPage(t *testing.T) {
 		{"targetgroup", "overview"},
 		{"counts", "overview"},
 		{"counts", "kubernetes"},
+		{"pod-cpu", "kubernetes"},
+		{"node-cpu", "kubernetes"},
 		{"pod-status", "overview"},
 		{"pod-status", "kubernetes"},
 		{"waf-traffic", "overview"},
@@ -903,6 +971,382 @@ func TestInsightsScanCostIsReported(t *testing.T) {
 	t.Error("no scan-cost stat")
 }
 
+// The WAF traffic panel answers "is traffic arriving, and is it getting
+// through". The list is what makes the second half answerable, and the count
+// beside it has to keep counting past the row cap.
+func TestWAFTrafficListsIndividualRequestsWithTheirAction(t *testing.T) {
+	_, h := newTestService(t)
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/waf-traffic?range=1h&period=5m")), "waf-traffic")
+
+	if panel.Table == nil || len(panel.Table.Rows) == 0 {
+		t.Fatalf("no request list: %+v", panel.Table)
+	}
+	actions := map[string]bool{}
+	for _, r := range panel.Table.Rows {
+		actions[fmt.Sprint(r["action"])] = true
+	}
+	// Filtered to blocks, an empty list cannot tell "nothing was blocked" from
+	// "nothing arrived".
+	if !actions["ALLOW"] || !actions["BLOCK"] {
+		t.Errorf("the list does not cover both outcomes: %v", actions)
+	}
+
+	// The total comes from the action series, counted over the whole window,
+	// not from the length of the capped list beside it. The stub's action
+	// series sums to 1,700 against two listed rows.
+	if panel.Table.Total != 1700 {
+		t.Errorf("table total = %d, want the action series' own sum of 1700", panel.Table.Total)
+	}
+	if !panel.Table.Truncated {
+		t.Error("a list far shorter than its total does not say it was cut")
+	}
+
+	// Bars over individual requests would draw a chart of bars all one high.
+	if panel.Bars != nil {
+		t.Errorf("the request list was turned into a distribution: %+v", panel.Bars)
+	}
+}
+
+// A WAF log does not carry the application's response code. responseCodeSent is
+// written only for a block with a custom response; a plain block answers 403
+// and records nothing; and anything allowed was answered by the application,
+// which only the pod logs saw. So the panel says which case each row is instead
+// of printing a number no record supports — and this is the test that fails
+// when someone later "fixes" the missing status column.
+func TestWAFDetailDoesNotInventAResponseCode(t *testing.T) {
+	_, h := newTestService(t)
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/waf-traffic?range=1h&period=5m")), "waf-traffic")
+
+	for _, c := range panel.Table.Columns {
+		if c.Key == "status" {
+			t.Errorf("the WAF table claims a status column: %+v", c)
+		}
+	}
+
+	notes := map[string]string{}
+	for _, r := range panel.Table.Rows {
+		notes[fmt.Sprint(r["action"])] = fmt.Sprint(r["responseCode"])
+	}
+	if got := notes["BLOCK"]; !strings.Contains(got, "403") || !strings.Contains(got, "기록되지 않음") {
+		t.Errorf("a plain block does not say 403 is the default and unrecorded: %q", got)
+	}
+	if got := notes["ALLOW"]; !strings.Contains(got, "팟 로그") {
+		t.Errorf("an allowed request does not point at where its code actually lives: %q", got)
+	}
+}
+
+// The expander is offered wherever a table declares a detail column, and
+// nowhere else — decided from the payload alone, never from a panel's name.
+//
+// The rule is not "per-request tables only", which is what this asserted when
+// waf-traffic was the only one: it is that a row has to have something left to
+// say. A request row does — the User-Agent and the response note are too long
+// for a column. A status-code row does too: its paths are a list, and a list
+// does not fit in a cell. waf-blocked and waf-breakdown rows are already their
+// own summary, so unfolding one would repeat back what is on screen.
+func TestOnlyRowsWithMoreToSayDeclareDetailColumns(t *testing.T) {
+	_, h := newTestService(t)
+	for panelID, wantDetail := range map[string]bool{
+		"waf-traffic":          true,
+		"pod-status-codes":     true,
+		"pod-status-breakdown": true,
+		"waf-blocked":          false,
+		"waf-breakdown":        false,
+	} {
+		panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/"+panelID+"?range=1h&period=5m")), panelID)
+		got := false
+		for _, c := range panel.Table.Columns {
+			got = got || c.Detail
+		}
+		if got != wantDetail {
+			t.Errorf("%s has detail columns = %v, want %v", panelID, got, wantDetail)
+		}
+	}
+}
+
+// The pod detail must not be contingent on a setting.
+//
+// It was: the only detail column the panel declared came from userAgentField,
+// which has no default because an access log has a User-Agent only if the
+// application wrote one. So a fresh install got no expander at all on the one
+// table an operator opens to ask "what were these 404s". The two columns that
+// replaced that dependency come from the Kubernetes envelope, which is there
+// whatever the log format says.
+func TestPodStatusDetailDoesNotDependOnAnOptionalField(t *testing.T) {
+	svc, h := newTestService(t)
+	if ua := svc.Store.Get().LogFormat.UserAgentField; ua != "" {
+		t.Fatalf("this test is only meaningful with no user-agent field configured, got %q", ua)
+	}
+
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-status-codes?range=1h&period=5m")), "pod-status-codes")
+	detail := map[string]bool{}
+	for _, c := range panel.Table.Columns {
+		if c.Detail {
+			detail[c.Key] = true
+		}
+	}
+	for _, key := range []string{"container", "namespace"} {
+		if !detail[key] {
+			t.Errorf("%q is not a detail column, so the table offers no expander by default", key)
+		}
+	}
+	if detail["userAgent"] {
+		t.Error("a User-Agent column was declared with no field configured; it would read \"—\"")
+	}
+
+	// Declaring the column is only half of it — the query has to have selected
+	// the value, or the expander opens onto a dash.
+	for _, r := range panel.Table.Rows {
+		if r["container"] == "" || r["container"] == nil {
+			t.Fatalf("a row carries no container: %+v", r)
+		}
+	}
+}
+
+// "404, 403 각각" — one row per status code, its paths inside the row.
+//
+// The fold has to keep every code, not the busiest ones: a flood of 404s and a
+// handful of 403s is the shape that makes this panel worth having, and it is
+// also the shape that a server-side top-N would destroy. And each code's count
+// has to stay in step with the chart on pod-status-codes, which counts the same
+// requests through an entirely different query.
+func TestPodStatusBreakdownFoldsPathsPerCode(t *testing.T) {
+	_, h := newTestService(t)
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-status-breakdown?range=1h&period=5m")), "pod-status-breakdown")
+
+	if panel.Table == nil {
+		t.Fatal("no breakdown table")
+	}
+	// Busiest first, one row each, no code dropped.
+	var codes []string
+	byCode := map[string]domain.Row{}
+	for _, r := range panel.Table.Rows {
+		code := fmt.Sprint(r["status"])
+		if _, dup := byCode[code]; dup {
+			t.Fatalf("status %s appears twice; the paths were not folded", code)
+		}
+		codes = append(codes, code)
+		byCode[code] = r
+	}
+	if want := []string{"503", "404"}; !slices.Equal(codes, want) {
+		t.Errorf("rows are %v, want %v (busiest code first)", codes, want)
+	}
+
+	// 780 + 20, the second of which has no path. A row with no path still
+	// happened, so it counts; it just has no name to list.
+	if got := byCode["503"]["count"]; got != float64(800) {
+		t.Errorf("503 counts %v, want 800 — the pathless row was dropped from the total", got)
+	}
+	if got := byCode["503"]["paths"]; got != float64(1) {
+		t.Errorf("503 lists %v paths, want 1 — the pathless row was offered as a path", got)
+	}
+
+	// Paths inside the row, busiest first, and only in the detail: a list does
+	// not fit in a cell.
+	if got := fmt.Sprint(byCode["404"]["topPaths"]); got != "/v1/user (300건) · /favicon.ico (120건) · /wp-login.php (64건)" {
+		t.Errorf("404 paths = %q", got)
+	}
+
+	// The table lists codes, and it lists all of them, so its total is the row
+	// count and nothing was capped away at this level.
+	if panel.Table.Total != int64(len(panel.Table.Rows)) || panel.Table.Truncated {
+		t.Errorf("table claims total %d over %d rows, truncated=%v",
+			panel.Table.Total, len(panel.Table.Rows), panel.Table.Truncated)
+	}
+
+	// The cross-check that matters: two queries, two panels, one population.
+	other := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-status-codes?range=1h&period=5m")), "pod-status-codes")
+	if want, got := statValue(t, other, "pod.badStatus.total"), statValue(t, panel, "pod.badStatus.byPath.total"); want != got {
+		t.Errorf("the breakdown totals %v where the chart totals %v", got, want)
+	}
+}
+
+// A dashboard with no path field configured still has to render. Every other
+// pod panel degrades in that configuration rather than failing, and this one is
+// reached through a page endpoint that a single returned error turns into a
+// failure card — and through a panel endpoint that answers 502.
+func TestPodStatusBreakdownDegradesWithoutAPathField(t *testing.T) {
+	svc, h := newTestService(t)
+	cfg := svc.Store.Get()
+	cfg.LogFormat.PathField = ""
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.Store.Get().LogFormat.PathField; got != "" {
+		t.Fatalf("clearing pathField was undone by defaults: %q", got)
+	}
+
+	rec := get(t, h, "/api/panel/pod-status-breakdown?range=1h&period=5m")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200 — the panel failed instead of degrading: %s", rec.Code, rec.Body)
+	}
+	panel := findPanel(t, decodePayload(t, rec), "pod-status-breakdown")
+	if len(panel.Warnings) == 0 {
+		t.Error("the panel came back empty without saying why")
+	}
+	// And no query was sent: a breakdown by path with no path field has nothing
+	// to ask for, so it must not pay for a scan to find that out.
+	if panel.Table != nil && len(panel.Table.Rows) > 0 {
+		t.Errorf("rows came back without a path field: %+v", panel.Table.Rows)
+	}
+
+	// The page it lives on renders too, rather than showing a failure card.
+	if rec := get(t, h, "/api/page/pod-logs?range=1h&period=5m"); rec.Code != http.StatusOK {
+		t.Fatalf("pod-logs status %d, want 200", rec.Code)
+	}
+}
+
+// Cutting a path list silently would read as "these are the paths", which for a
+// 404 flood is the opposite of true.
+func TestTopPathsSaysWhatItLeftOut(t *testing.T) {
+	b := statusBucket{code: "404", paths: []pathCount{
+		{"/a", 3}, {"/b", 2}, {"/c", 1},
+	}}
+	if got := topPathsNote(b, 2); got != "/a (3건) · /b (2건) · 외 1개" {
+		t.Errorf("topPathsNote = %q", got)
+	}
+	if got := topPathsNote(b, 10); strings.Contains(got, "외") {
+		t.Errorf("nothing was cut but the note says otherwise: %q", got)
+	}
+	if got := topPathsNote(statusBucket{code: "503"}, 10); !strings.Contains(got, "기록되지") {
+		t.Errorf("a code with no paths at all reads %q", got)
+	}
+}
+
+// A stats result that hit the Insights ceiling is not a smaller answer, it is a
+// wrong one — the rows it kept are whatever came back first, so every total
+// derived from them is short by an unknown amount. Nothing read the flag before
+// this, so a truncated aggregate was drawn as a complete one.
+func TestTruncatedAggregateIsReported(t *testing.T) {
+	panel := &domain.Panel{ID: "p"}
+	warnIfTruncated(panel, "pod.badStatus.byPath", map[string]awsx.QueryResult{
+		"pod.badStatus.byPath": {Truncated: true},
+		"other":                {Truncated: false},
+	})
+	if len(panel.Warnings) != 1 || !strings.Contains(panel.Warnings[0], "pod.badStatus.byPath") {
+		t.Errorf("warnings = %v", panel.Warnings)
+	}
+
+	quiet := &domain.Panel{ID: "p"}
+	warnIfTruncated(quiet, "pod.badStatus.byPath", map[string]awsx.QueryResult{
+		"pod.badStatus.byPath": {Truncated: false},
+	})
+	if len(quiet.Warnings) != 0 {
+		t.Errorf("a complete result warned anyway: %v", quiet.Warnings)
+	}
+}
+
+// One number counting both the requests that reached the application and the
+// requests the WAF stopped is the thing this breakdown exists to stop being.
+func TestWAFBreakdownSplitsEachKeyByAction(t *testing.T) {
+	_, h := newTestService(t)
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/waf-breakdown?range=1h&period=5m")), "waf-breakdown")
+
+	if panel.Table == nil || len(panel.Table.Rows) == 0 {
+		t.Fatal("no breakdown table")
+	}
+	num := func(r domain.Row, key string) float64 {
+		t.Helper()
+		v, ok := r[key].(float64)
+		if !ok {
+			t.Fatalf("row %v has no numeric %q", r, key)
+		}
+		return v
+	}
+
+	var sawGET bool
+	for _, r := range panel.Table.Rows {
+		// The columns have to add up, or the reader works out the difference
+		// and finds it means nothing.
+		if got, want := num(r, "allow")+num(r, "block")+num(r, "other"), num(r, "count"); got != want {
+			t.Errorf("row %v: allow+block+other = %v, count = %v", r, got, want)
+		}
+		if r["dimension"] != "method" || r["key"] != "GET" {
+			continue
+		}
+		sawGET = true
+		// The stub sends GET twice, allowed 1,400 and blocked 100. Folded into
+		// one row, with the newer of the two timestamps deciding the last
+		// action — which is the block.
+		if num(r, "allow") != 1400 || num(r, "block") != 100 || num(r, "count") != 1500 {
+			t.Errorf("GET row = %v", r)
+		}
+		if r["lastAction"] != "BLOCK" {
+			t.Errorf("GET last action = %v, want the newer of the two rows", r["lastAction"])
+		}
+	}
+	if !sawGET {
+		t.Error("the method breakdown lost its rows in the pivot")
+	}
+}
+
+// The traffic check reaches the service itself, which is the one thing on this
+// dashboard CloudWatch cannot answer: an empty panel does not say whether
+// nothing happened or nothing was published.
+func TestTrafficCheckReportsWhatTheServiceAnswered(t *testing.T) {
+	var got *http.Request
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Clone(context.Background())
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	svc, _ := newTestService(t)
+	cfg := svc.Store.Get()
+	cfg.Check.URL = target.URL + "/healthz"
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+	h := svc.Handler()
+
+	var res checkResult
+	decodeJSON(t, post(t, h, "/api/check"), &res)
+	if !res.OK || res.Status != http.StatusNoContent {
+		t.Errorf("check = %+v, want a healthy 204", res)
+	}
+	if res.Expect != "2xx" {
+		t.Errorf("expect = %q; a red result cannot be read without it", res.Expect)
+	}
+	if got == nil || got.URL.Path != "/healthz" {
+		t.Fatalf("the probe did not reach the target: %v", got)
+	}
+	// Whoever reads the target's access log has to be able to tell this apart
+	// from the real traffic it stands in for.
+	if ua := got.Header.Get("User-Agent"); !strings.Contains(ua, "skills-dashboard") {
+		t.Errorf("User-Agent = %q", ua)
+	}
+
+	// An unexpected status is a completed check with a bad answer, not a
+	// broken endpoint: collapsing the two makes a dashboard bug look like an
+	// outage.
+	cfg.Check.ExpectStatus = http.StatusOK
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+	res = checkResult{}
+	rec := post(t, h, "/api/check")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	decodeJSON(t, rec, &res)
+	if res.OK {
+		t.Errorf("204 counted as healthy against an explicit expectStatus of 200: %+v", res)
+	}
+}
+
+func TestTrafficCheckWithoutATargetSaysSoRatherThanProbing(t *testing.T) {
+	svc, _ := newTestService(t)
+	cfg := svc.Store.Get()
+	cfg.Check = config.HealthCheck{}
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := post(t, svc.Handler(), "/api/check"); rec.Code != http.StatusBadRequest {
+		t.Errorf("status %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // A panel that fails must not blank the ones beside it.
 func TestAFailingPanelDoesNotSinkThePage(t *testing.T) {
 	svc, _ := newTestService(t)
@@ -944,7 +1388,7 @@ func TestUnselectedResourcesProduceAnExplanationNotAnError(t *testing.T) {
 	}
 	h := svc.Handler()
 
-	for _, id := range []string{"targetgroup", "rds-proxy", "waf-metrics", "pod-resource", "counts"} {
+	for _, id := range []string{"targetgroup", "rds-proxy", "waf-metrics", "pod-cpu", "counts"} {
 		p := decodePayload(t, get(t, h, "/api/panel/"+id+"?range=1h&period=5m"))
 		panel := findPanel(t, p, id)
 		if len(panel.Warnings) == 0 {
@@ -1250,6 +1694,42 @@ func TestTargetGroupPanelStillScopesTheLoadBalancerFallback(t *testing.T) {
 	}
 }
 
+// Telling duplicate series apart is not a target-group problem.
+//
+// One filter set yields several series whenever the SEARCH schema leaves a
+// dimension unpinned, and then the set's own name labels every one of them
+// identically — a legend of repeated words over lines that mean different
+// things. The rule lives in setSeriesLabel so every panel plotted from filter
+// sets gets it; this holds the RDS Proxy panel, which used to be one of the
+// copies that did not.
+func TestOneFilterSetWithSeveralSeriesLabelsThemApart(t *testing.T) {
+	svc, h := newTestService(t)
+	cfg := svc.Store.Get()
+	cfg.RDSProxies = []string{"app-proxy"}
+	if err := svc.Store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	p := decodePayload(t, get(t, h, "/api/panel/rds-proxy?range=1h&period=5m"))
+	panel := findPanel(t, p, "rds-proxy")
+	if len(panel.Series) < 2 {
+		t.Fatalf("got %d series, want the several one proxy can match", len(panel.Series))
+	}
+
+	seen := map[string]bool{}
+	for _, s := range panel.Series {
+		if seen[s.Label] {
+			t.Errorf("two series share the label %q, so the legend cannot tell them apart", s.Label)
+		}
+		seen[s.Label] = true
+	}
+	// The suffix is CloudWatch's own label, which carries the dimensions it
+	// matched. The stub returns "alpha" and "beta" for every query.
+	if !strings.Contains(panel.Series[0].Label, "(") {
+		t.Errorf("label %q does not carry the dimensions that distinguish it", panel.Series[0].Label)
+	}
+}
+
 // RDS Proxy and Web ACL discovery had no test at all, which is how two
 // endpoints an operator depends on came to be shipped untried.
 func TestRDSProxyDiscoveryListsProxies(t *testing.T) {
@@ -1324,12 +1804,8 @@ func TestDiscoveryReportsATruncatedWalk(t *testing.T) {
 	}
 }
 
-// endlessELB never stops paginating.
-type endlessELB struct{}
-
-func (endlessELB) DescribeLoadBalancers(context.Context, *elasticloadbalancingv2.DescribeLoadBalancersInput, ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeLoadBalancersOutput, error) {
-	return &elasticloadbalancingv2.DescribeLoadBalancersOutput{}, nil
-}
+// endlessELB is stubELB with a target group walk that never stops paginating.
+type endlessELB struct{ stubELB }
 
 func (endlessELB) DescribeTargetGroups(context.Context, *elasticloadbalancingv2.DescribeTargetGroupsInput, ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeTargetGroupsOutput, error) {
 	return &elasticloadbalancingv2.DescribeTargetGroupsOutput{
@@ -1444,6 +1920,217 @@ func TestNodeCountReportsMinimumAndMaximum(t *testing.T) {
 	// rather than imply they are an autoscaler's configured limits.
 	if b := stats["pods.min"].Basis; !strings.Contains(b, "관측") {
 		t.Errorf("pods.min basis = %q, want it to state that the value is observed", b)
+	}
+}
+
+// fixedMetrics answers every query with the same named results, and lets a test
+// say that a result carries no sample at all.
+//
+// The silent case is not a hypothetical. A SEARCH matches CloudWatch's metric
+// index, which holds a metric for about a fortnight after its last datapoint,
+// so every node the cluster has ever run comes back — with nothing in it.
+type fixedMetrics struct{ subjects []fixedSubject }
+
+type fixedSubject struct {
+	label  string
+	silent bool
+}
+
+func liveSubjects(labels ...string) []fixedSubject {
+	out := make([]fixedSubject, 0, len(labels))
+	for _, l := range labels {
+		out = append(out, fixedSubject{label: l})
+	}
+	return out
+}
+
+func (f *fixedMetrics) GetMetricData(_ context.Context, in *cloudwatch.GetMetricDataInput, _ ...func(*cloudwatch.Options)) (*cloudwatch.GetMetricDataOutput, error) {
+	start, end := aws.ToTime(in.StartTime), aws.ToTime(in.EndTime)
+	var out cloudwatch.GetMetricDataOutput
+	for qi, q := range in.MetricDataQueries {
+		period := time.Duration(aws.ToInt32(q.Period)) * time.Second
+		if period <= 0 {
+			period = 5 * time.Minute
+		}
+		for si, sub := range f.subjects {
+			r := cwtypes.MetricDataResult{Id: q.Id, Label: aws.String(sub.label)}
+			if !sub.silent {
+				i := 0
+				for t := start; t.Before(end); t = t.Add(period) {
+					r.Timestamps = append(r.Timestamps, t)
+					r.Values = append(r.Values, float64((qi+1)*10+si*3+i%7))
+					i++
+				}
+			}
+			out.MetricDataResults = append(out.MetricDataResults, r)
+		}
+	}
+	return &out, nil
+}
+
+// withMetrics points a test service at a specific set of CloudWatch answers.
+func withMetrics(t *testing.T, subjects []fixedSubject) http.Handler {
+	t.Helper()
+	svc, h := newTestService(t)
+	svc.Clients.CW = &fixedMetrics{subjects: subjects}
+	return h
+}
+
+// subjectOf recovers the pod or node a series belongs to from its label, which
+// buildResourcePanel forms as "<CloudWatch label> · <metric>".
+func subjectOf(label string) string {
+	if i := strings.Index(label, " · "); i >= 0 {
+		return label[:i]
+	}
+	return label
+}
+
+// A panel whose one spec fans out into one line per pod took the spec's colour
+// for every line, so twenty pods drew twenty identical indigo lines and the
+// legend text was the only thing telling them apart. Colour has to name the
+// subject where the subject is what varies.
+func TestEachPodGetsItsOwnColourOnTheCPUPanel(t *testing.T) {
+	h := withMetrics(t, liveSubjects("checkout-7d9", "search-4b1", "product-2ff"))
+
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-cpu?range=1h&period=5m")), "pod-cpu")
+
+	colors := map[string]string{}
+	for _, s := range panel.Series {
+		subject := subjectOf(s.Label)
+		if prev, ok := colors[subject]; ok && prev != s.Color {
+			t.Errorf("pod %q is drawn in two colours, %q and %q", subject, prev, s.Color)
+		}
+		colors[subject] = s.Color
+	}
+	if len(colors) != 3 {
+		t.Fatalf("panel drew %d pods, want the 3 CloudWatch returned", len(colors))
+	}
+
+	distinct := map[string]bool{}
+	for _, c := range colors {
+		distinct[c] = true
+	}
+	if len(distinct) != len(colors) {
+		t.Errorf("%d pods share %d colours: %v", len(colors), len(distinct), colors)
+	}
+}
+
+// Colour names the pod, so the two CPU metrics of one pod must be the same
+// colour — and then something else has to tell them apart.
+func TestOnePodKeepsOneColourAcrossUsageAndLimit(t *testing.T) {
+	h := withMetrics(t, liveSubjects("checkout-7d9", "search-4b1"))
+
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-cpu?range=1h&period=5m")), "pod-cpu")
+
+	dashes := map[string]map[string]bool{}
+	for _, s := range panel.Series {
+		subject := subjectOf(s.Label)
+		if dashes[subject] == nil {
+			dashes[subject] = map[string]bool{}
+		}
+		dashes[subject][s.Dash] = true
+	}
+	if len(dashes) == 0 {
+		t.Fatal("the panel drew no series")
+	}
+	for subject, seen := range dashes {
+		if len(seen) != 2 {
+			t.Errorf("pod %q draws its two CPU metrics with %d line pattern(s), want 2: %v", subject, len(seen), seen)
+		}
+		if !seen[domain.DashSolid] {
+			t.Errorf("pod %q has no solid line, so nothing on it reads as the plain utilisation", subject)
+		}
+	}
+}
+
+// The colour must survive a refresh. Series are sorted by value, so the busiest
+// pod changes places between polls; a colour taken from that order would make
+// every line change colour whenever the load did.
+func TestSubjectColoursAreStableAcrossRefreshes(t *testing.T) {
+	first := withMetrics(t, liveSubjects("checkout-7d9", "search-4b1", "product-2ff"))
+	second := withMetrics(t, liveSubjects("product-2ff", "checkout-7d9", "search-4b1"))
+
+	colorsOf := func(h http.Handler) map[string]string {
+		panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/pod-cpu?range=1h&period=5m")), "pod-cpu")
+		out := map[string]string{}
+		for _, s := range panel.Series {
+			out[subjectOf(s.Label)] = s.Color
+		}
+		return out
+	}
+
+	a, b := colorsOf(first), colorsOf(second)
+	for subject, color := range a {
+		if b[subject] != color {
+			t.Errorf("pod %q was %q and is now %q after the results came back in a different order", subject, color, b[subject])
+		}
+	}
+}
+
+// One live node read as a dozen. Every instance the cluster had ever run came
+// back from the SEARCH with no samples in it, drew an all-gap line, took a
+// legend row, and counted towards the panel's node total.
+func TestNodesWithNoSamplesInTheWindowAreNotDrawn(t *testing.T) {
+	h := withMetrics(t, []fixedSubject{
+		{label: "prod i-0live ip-10-0-1-9"},
+		{label: "prod i-0dead1 ip-10-0-1-1", silent: true},
+		{label: "prod i-0dead2 ip-10-0-1-2", silent: true},
+		{label: "prod i-0dead3 ip-10-0-1-3", silent: true},
+	})
+
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/node-cpu?range=1h&period=5m")), "node-cpu")
+
+	if len(panel.Series) != 1 {
+		labels := make([]string, 0, len(panel.Series))
+		for _, s := range panel.Series {
+			labels = append(labels, s.Label)
+		}
+		t.Fatalf("panel drew %d nodes for one live node: %v", len(panel.Series), labels)
+	}
+	if !strings.Contains(panel.Series[0].Label, "i-0live") {
+		t.Errorf("the surviving series is %q, not the live node", panel.Series[0].Label)
+	}
+}
+
+// Dropping the dead nodes silently would trade one wrong number for another, so
+// the stat says both what it counted and what it left out.
+func TestNodeBasisCountsOnlyTheNodesItDrew(t *testing.T) {
+	h := withMetrics(t, []fixedSubject{
+		{label: "prod i-0live ip-10-0-1-9"},
+		{label: "prod i-0dead1 ip-10-0-1-1", silent: true},
+		{label: "prod i-0dead2 ip-10-0-1-2", silent: true},
+		{label: "prod i-0dead3 ip-10-0-1-3", silent: true},
+	})
+
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/node-cpu?range=1h&period=5m")), "node-cpu")
+	if len(panel.Stats) == 0 {
+		t.Fatal("the node panel carries no stat")
+	}
+	basis := panel.Stats[0].Basis
+	if !strings.Contains(basis, "노드 1개") {
+		t.Errorf("basis = %q, want it to count the one node it drew", basis)
+	}
+	if !strings.Contains(basis, "3개 제외") {
+		t.Errorf("basis = %q, want it to say how many series it left out", basis)
+	}
+}
+
+// The palette belongs to panels where the subject varies. Where the colour is
+// the meaning — a WAF panel's 차단 line, a latency percentile — it must not move.
+func TestPanelsWithChosenSubjectsKeepTheirSemanticColour(t *testing.T) {
+	_, h := newTestService(t)
+
+	panel := findPanel(t, decodePayload(t, get(t, h, "/api/panel/waf-metrics?range=1h&period=5m")), "waf-metrics")
+	for _, s := range panel.Series {
+		if !strings.Contains(s.Label, "차단") {
+			continue
+		}
+		if s.Color != domain.ColorPink {
+			t.Errorf("the 차단 series is %q, not the colour that means blocked", s.Color)
+		}
+		if s.Dash != domain.DashSolid {
+			t.Errorf("the 차단 series took a dash pattern it never asked for: %q", s.Dash)
+		}
 	}
 }
 

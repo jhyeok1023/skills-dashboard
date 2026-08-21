@@ -165,6 +165,106 @@ func TestCacheRespectsContextCancellationWhileWaiting(t *testing.T) {
 	close(release)
 }
 
+// The dashboard's intermittent "sometimes it loads, sometimes it errors".
+//
+// The browser aborts the in-flight page request whenever the selection changes,
+// and the aborted request is usually the one holding the cache key. Its
+// "context canceled" used to be stored as a cached failure and handed to the
+// request that replaced it — and because the window is floored to the period, a
+// 1m period keeps the key identical for a full minute, so the retry landed on
+// the same poisoned entry.
+func TestCacheDoesNotPoisonTheKeyWhenItsOwnCallerIsCancelled(t *testing.T) {
+	c := &Cache{TTL: time.Minute}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// The first caller goes away mid-load, exactly as an aborted fetch does.
+	_, err := c.Do(ctx, "k", func(ctx context.Context) (any, error) {
+		cancel()
+		return nil, ctx.Err()
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("first caller error = %v, want context.Canceled", err)
+	}
+	if n := c.Len(); n != 0 {
+		t.Errorf("cache holds %d entries after a cancelled load, want 0", n)
+	}
+
+	// The next caller has its own live context and must get a real answer.
+	got, err := c.Do(context.Background(), "k", func(context.Context) (any, error) {
+		return "value", nil
+	})
+	if err != nil {
+		t.Fatalf("second caller error = %v", err)
+	}
+	if got != "value" {
+		t.Errorf("second caller got %v, want value", got)
+	}
+}
+
+// A caller already blocked on the entry has to loop round and reload rather
+// than be handed the cancellation of the caller it was waiting on.
+func TestCacheReloadsForAWaiterWhenTheLoadingCallerIsCancelled(t *testing.T) {
+	c := &Cache{TTL: time.Minute}
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	go func() {
+		_, _ = c.Do(ctx, "k", func(ctx context.Context) (any, error) {
+			close(started)
+			<-release
+			return nil, ctx.Err()
+		})
+	}()
+	<-started
+
+	waited := make(chan error, 1)
+	go func() {
+		got, err := c.Do(context.Background(), "k", func(context.Context) (any, error) {
+			return "value", nil
+		})
+		if err == nil && got != "value" {
+			err = errors.New("waiter got " + got.(string))
+		}
+		waited <- err
+	}()
+
+	// Let the waiter arrive at the entry before the loading caller dies.
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+	close(release)
+
+	select {
+	case err := <-waited:
+		if err != nil {
+			t.Errorf("waiter error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the waiter never returned")
+	}
+}
+
+// A failure that is not the caller's doing is still worth remembering briefly,
+// so a failing dependency is not re-attempted at full rate.
+func TestCacheStillRemembersFailuresFromALiveCaller(t *testing.T) {
+	var calls int32
+	c := &Cache{TTL: time.Minute, ErrorTTL: time.Minute}
+	boom := errors.New("throttled")
+	load := func(context.Context) (any, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, boom
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := c.Do(context.Background(), "k", load); !errors.Is(err, boom) {
+			t.Fatalf("error = %v", err)
+		}
+	}
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Errorf("loader ran %d times, want 1", n)
+	}
+}
+
 // An unbounded map that is never swept is a leak waiting for a new key format.
 func TestCacheEvictsExpiredEntries(t *testing.T) {
 	now := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)

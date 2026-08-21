@@ -69,13 +69,47 @@ describe('request failures', () => {
 	});
 });
 
+describe('page', () => {
+	it('reports the bound it actually waited, not the discovery one', async () => {
+		// A page waits out the server's 90s budget; a discovery gives up at 35.
+		// Naming the wrong one sends the operator looking for the wrong problem.
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockRejectedValue(new DOMException('The operation timed out.', 'TimeoutError'))
+		);
+
+		await expect(api.page('waf', '1h', '1m')).rejects.toThrow('95초');
+	});
+
+	it('keeps the caller able to cancel after the timeout is folded in', async () => {
+		// PageView aborts the in-flight request on every range change. Combining
+		// its signal with the timeout must not drop it, or an abandoned request
+		// runs to completion and races the one that replaced it.
+		let seen: AbortSignal | undefined;
+		vi.stubGlobal(
+			'fetch',
+			vi.fn((_: string, init: RequestInit) => {
+				seen = init.signal ?? undefined;
+				return new Promise(() => {});
+			})
+		);
+
+		const controller = new AbortController();
+		void api.page('waf', '1h', '1m', controller.signal);
+		expect(seen).toBeDefined();
+		expect(seen!.aborted).toBe(false);
+
+		controller.abort();
+		expect(seen!.aborted).toBe(true);
+	});
+});
+
 describe('discover', () => {
 	it('passes the caveats a listing came back with', async () => {
 		respondWith({
 			kind: 'targetgroups',
 			resources: [],
 			truncated: true,
-			elapsedMs: 812,
 			partial: ['CLOUDFRONT 스코프 조회 실패: denied']
 		});
 

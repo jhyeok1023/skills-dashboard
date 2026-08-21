@@ -50,8 +50,50 @@
 	--intent-bad: var(--system-red);
 	--intent-neutral: var(--label-secondary);
 
+	/* WAF actions. Fixed per action and named here so a block is the same
+	   colour in a line, a swatch, a tooltip row and a badge. These alias the
+	   system colours rather than restating them, so they follow the theme
+	   without being spelled out in each appearance below.
+
+	   They must agree with wafActionColor() in internal/api/panels_logs.go,
+	   which tags each series with the same system colour name. */
+	--waf-allow: var(--system-green);
+	--waf-block: var(--system-pink);
+	--waf-count: var(--system-gray);
+	--waf-challenge: var(--system-orange);
+	--waf-captcha: var(--system-purple);
+
+	/* One ordering for everything that overlaps, so a panel lifted for an
+	   alarm cannot end up on top of the header that scrolls over it. */
+	--z-panel: 0;
+	--z-panel-alarm: 2;
+	--z-sticky-head: 9;
+	--z-topbar: 10;
+	--z-tooltip: 50;
+	/* Above the tooltip, so an expanded chart's own readout is not overlapped
+	   by a readout belonging to the page underneath. A native <dialog> in its
+	   top layer is above all of this anyway; the token keeps the ordering
+	   written down in one place rather than implied by the element. */
+	--z-modal: 100;
+
 	--radius-card: 12px;
 	--radius-control: 8px;
+
+	/* Motion. Durations by role, not by component: what a change means picks
+	   its speed, so two changes of the same kind can never animate apart.
+	   Reduced motion is handled globally in app.css — the override there
+	   collapses every animation and transition, including third-party CSS
+	   these tokens never reach, so it is not restated per token here. */
+	--dur-instant: 100ms; /* colour, opacity, press */
+	--dur-quick: 180ms; /* small movement, entrance */
+	--dur-move: 280ms; /* panels, view transitions */
+	--dur-exit: 140ms; /* every exit */
+	--ease-out: cubic-bezier(0.22, 1, 0.36, 1); /* default */
+	--ease-in-out: cubic-bezier(0.65, 0, 0.35, 1); /* self-running motion only */
+	/* Indicators, not transitions: a spin or pulse cycle has a rhythm, not a
+	   role, so these sit outside the scale above. */
+	--dur-spin: 700ms;
+	--dur-pulse: 1400ms;
 
 	--font-ui:
 		-apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', 'Pretendard',

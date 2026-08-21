@@ -47,15 +47,11 @@ type Listing struct {
 	Truncated bool
 }
 
-func sortResources(rs []Resource) []Resource {
-	sort.Slice(rs, func(i, j int) bool { return rs[i].Name < rs[j].Name })
-	return rs
-}
-
 // sorted finishes a walk: the resources in name order, plus whether the page
 // cap stopped it early.
 func sorted(rs []Resource, truncated bool) Listing {
-	return Listing{Resources: sortResources(rs), Truncated: truncated}
+	sort.Slice(rs, func(i, j int) bool { return rs[i].Name < rs[j].Name })
+	return Listing{Resources: rs, Truncated: truncated}
 }
 
 // describeLoadBalancers walks every page of load balancers in the region. Both
@@ -70,6 +66,24 @@ func describeLoadBalancers(ctx context.Context, api LoadBalancerAPI) ([]elbtypes
 			return nil, false, fmt.Errorf("DescribeLoadBalancers: %w", err)
 		}
 		out = append(out, resp.LoadBalancers...)
+		if resp.NextMarker == nil || *resp.NextMarker == "" {
+			return out, false, nil
+		}
+		in.Marker = resp.NextMarker
+	}
+	return out, true, nil
+}
+
+// describeTargetGroups walks every page of target groups in the region.
+func describeTargetGroups(ctx context.Context, api LoadBalancerAPI) ([]elbtypes.TargetGroup, bool, error) {
+	var out []elbtypes.TargetGroup
+	var in elasticloadbalancingv2.DescribeTargetGroupsInput
+	for page := 0; page < maxDiscoveryPages; page++ {
+		resp, err := api.DescribeTargetGroups(ctx, &in)
+		if err != nil {
+			return nil, false, fmt.Errorf("DescribeTargetGroups: %w", err)
+		}
+		out = append(out, resp.TargetGroups...)
 		if resp.NextMarker == nil || *resp.NextMarker == "" {
 			return out, false, nil
 		}
@@ -114,10 +128,14 @@ func LoadBalancers(ctx context.Context, api LoadBalancerAPI) (Listing, error) {
 // list is only consumed at the end, to put a name on each group's ARN — and
 // with one target group per application the list is long enough that doing them
 // in sequence is felt: the settings button spends the sum of the two rather
-// than the longer of them. Neither goroutine cancels the other on failure;
-// both are bounded by the caller's deadline and each is a single call chain, so
-// a cancel tree would buy less than it costs to read.
+// than the longer of them. Either failing cancels the other, so a walk whose
+// result is already destined for the bin stops paging; the cancelled sibling
+// reports "context canceled" alongside the failure that caused it, which is
+// what happened.
 func TargetGroups(ctx context.Context, api LoadBalancerAPI) (Listing, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var (
 		wg          sync.WaitGroup
 		lbs         []elbtypes.LoadBalancer
@@ -132,24 +150,15 @@ func TargetGroups(ctx context.Context, api LoadBalancerAPI) (Listing, error) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		lbs, lbTruncated, lbErr = describeLoadBalancers(ctx, api)
+		if lbs, lbTruncated, lbErr = describeLoadBalancers(ctx, api); lbErr != nil {
+			cancel()
+		}
 	}()
 	go func() {
 		defer wg.Done()
-		var in elasticloadbalancingv2.DescribeTargetGroupsInput
-		for page := 0; page < maxDiscoveryPages; page++ {
-			resp, err := api.DescribeTargetGroups(ctx, &in)
-			if err != nil {
-				tgErr = fmt.Errorf("DescribeTargetGroups: %w", err)
-				return
-			}
-			groups = append(groups, resp.TargetGroups...)
-			if resp.NextMarker == nil || *resp.NextMarker == "" {
-				return
-			}
-			in.Marker = resp.NextMarker
+		if groups, tgTruncated, tgErr = describeTargetGroups(ctx, api); tgErr != nil {
+			cancel()
 		}
-		tgTruncated = true
 	}()
 	wg.Wait()
 

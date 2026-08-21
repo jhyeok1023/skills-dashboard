@@ -64,8 +64,40 @@ const (
 	ColorRed    = "systemRed"
 	ColorTeal   = "systemTeal"
 	ColorYellow = "systemYellow"
+	ColorMint   = "systemMint"
 	ColorGray   = "systemGray"
 )
+
+// SubjectPalette colours one subject — a pod, a node — on a panel where a
+// single spec fans out into many series.
+//
+// A spec's own colour says what the line measures, which is the right answer
+// when a chart holds one line per metric. It is the wrong answer when the
+// SEARCH fans out: every pod on the CPU panel took ColorIndigo, so twenty pods
+// drew twenty identical lines and the legend text was the only way to tell them
+// apart. Colour has to carry the subject there, and the metric moves to the
+// line's dash pattern — see VariantDash.
+//
+// The order is not the constant block's. Neighbouring entries are kept apart
+// under red-green and blue-yellow colour vision deficiency, so a chart with
+// three pods on it does not hand out three colours that some readers see as
+// one. ColorGray is excluded: sumSeries already spends it on totals.
+var SubjectPalette = []string{
+	ColorBlue, ColorOrange, ColorGreen, ColorPink, ColorPurple,
+	ColorYellow, ColorTeal, ColorRed, ColorIndigo, ColorMint,
+}
+
+// SubjectColor picks the palette entry for the i-th subject, cycling when a
+// panel holds more subjects than the palette has colours. Past that point the
+// dash pattern and the legend label are what separate two lines; the caller is
+// expected to order subjects deterministically so a colour does not move
+// between refreshes.
+func SubjectColor(i int) string {
+	if i < 0 {
+		i = 0
+	}
+	return SubjectPalette[i%len(SubjectPalette)]
+}
 
 // TargetGroupMetrics covers requirement 3: target response time, 5xx and 4xx.
 func TargetGroupMetrics() []MetricSpec {
@@ -93,8 +125,14 @@ func PodResourceMetrics() []MetricSpec {
 }
 
 // NodeResourceMetrics covers requirement 5.
+//
+// InstanceId belongs in the schema even though nothing pins it: Container
+// Insights publishes the node metrics under {NodeName, ClusterName, InstanceId}
+// and {ClusterName}, and nothing else. A SEARCH schema is matched as a set, so
+// {ClusterName,NodeName} matched no metric at all and the panel rendered empty
+// — indistinguishable from a cluster with Container Insights switched off.
 func NodeResourceMetrics() []MetricSpec {
-	dims := []string{"ClusterName", "NodeName"}
+	dims := []string{"ClusterName", "InstanceId", "NodeName"}
 	return []MetricSpec{
 		{Key: "node.cpu", Label: "CPU 사용률", Namespace: NSContainer, MetricName: "node_cpu_utilization", Stat: StatAvg, Unit: UnitPercent, Color: ColorIndigo, Dimensions: dims},
 		{Key: "node.mem", Label: "메모리 사용률", Namespace: NSContainer, MetricName: "node_memory_utilization", Stat: StatAvg, Unit: UnitPercent, Color: ColorTeal, Dimensions: dims},
@@ -113,11 +151,18 @@ func CountMetrics() []MetricSpec {
 
 // PodStatusMetrics covers requirement 7.
 //
-// Container Insights has no OOMKilled metric. Restarts are the closest signal
-// it publishes, and the OOM count shown beside them comes from matching the
-// pod log stream instead — a limitation the UI states rather than papers over.
+// PodName is in the schema because none of these metrics is published at
+// {Namespace, ClusterName}: the pod-level set is {PodName, Namespace,
+// ClusterName}. The panel sums the fan-out back down, so the numbers mean the
+// same thing they were meant to; without PodName they meant nothing, because
+// the SEARCH matched no series.
+//
+// pod_status_* is published only by Container Insights with enhanced
+// observability. pod_number_of_container_restarts is published by both, which
+// is why the panel can still say something on a cluster running the older
+// agent.
 func PodStatusMetrics() []MetricSpec {
-	dims := []string{"ClusterName", "Namespace"}
+	dims := []string{"ClusterName", "Namespace", "PodName"}
 	return []MetricSpec{
 		{Key: "pod.running", Label: "Running", Namespace: NSContainer, MetricName: "pod_status_running", Stat: StatAvg, Unit: UnitCount, Color: ColorGreen, Intent: IntentGood, Dimensions: dims},
 		{Key: "pod.pending", Label: "Pending", Namespace: NSContainer, MetricName: "pod_status_pending", Stat: StatAvg, Unit: UnitCount, Color: ColorOrange, Intent: IntentWarn, Dimensions: dims},
@@ -143,10 +188,26 @@ func RDSProxyMetrics() []MetricSpec {
 func WAFMetrics() []MetricSpec {
 	dims := []string{"WebACL", "Rule", "Region"}
 	return []MetricSpec{
-		{Key: "waf.allowed", Label: "허용", Namespace: NSWAFV2, MetricName: "AllowedRequests", Stat: StatSum, Unit: UnitCount, Color: ColorGreen, Intent: IntentGood, Dimensions: dims},
-		{Key: "waf.blocked", Label: "차단", Namespace: NSWAFV2, MetricName: "BlockedRequests", Stat: StatSum, Unit: UnitCount, Color: ColorPink, Intent: IntentBad, Dimensions: dims},
+		// No intent on either: a WAF blocking requests is the normal operating
+		// state, so flagging it permanently lit the alarm and buried the cases
+		// that actually deviate. Colour still separates the two.
+		{Key: "waf.allowed", Label: "허용", Namespace: NSWAFV2, MetricName: "AllowedRequests", Stat: StatSum, Unit: UnitCount, Color: ColorGreen, Dimensions: dims},
+		{Key: "waf.blocked", Label: "차단", Namespace: NSWAFV2, MetricName: "BlockedRequests", Stat: StatSum, Unit: UnitCount, Color: ColorPink, Dimensions: dims},
 		{Key: "waf.counted", Label: "카운트", Namespace: NSWAFV2, MetricName: "CountedRequests", Stat: StatSum, Unit: UnitCount, Color: ColorGray, Dimensions: dims},
 	}
+}
+
+// SpecsWithPrefix picks the specs whose key begins with prefix, so a panel can
+// plot CPU without memory sharing its chart. The keys already nest — pod.cpu
+// carries pod.cpu.limit with it — so one prefix names a whole resource.
+func SpecsWithPrefix(specs []MetricSpec, prefix string) []MetricSpec {
+	out := make([]MetricSpec, 0, len(specs))
+	for _, s := range specs {
+		if strings.HasPrefix(s.Key, prefix) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // AllMetrics is every spec the dashboard knows about, used to assert that keys

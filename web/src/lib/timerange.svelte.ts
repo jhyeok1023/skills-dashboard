@@ -19,8 +19,10 @@ const FALLBACK: Meta['ranges'] = [
 	{ range: '4h', seconds: 14400, periods: ['1m', '5m', '10m', '1h'], defaultPeriod: '5m' }
 ];
 
-/** Auto-refresh choices. Off is the default: every refresh scans logs, and
- *  Logs Insights bills by the byte. */
+/** Auto-refresh choices and the default. 30s is the floor: every refresh scans
+ *  logs, and Logs Insights bills by the byte. */
+export const DEFAULT_REFRESH_SECONDS = 60;
+
 export const REFRESH_CHOICES = [
 	{ label: '수동', seconds: 0 },
 	{ label: '30초', seconds: 30 },
@@ -32,7 +34,7 @@ class TimeRange {
 	ranges = $state<Meta['ranges']>(FALLBACK);
 	range = $state('1h');
 	period = $state('1m');
-	refreshSeconds = $state(0);
+	refreshSeconds = $state(DEFAULT_REFRESH_SECONDS);
 
 	/** Bumped whenever a manual refresh is requested. */
 	nonce = $state(0);
@@ -95,8 +97,9 @@ class TimeRange {
 		const params = new URLSearchParams(existing ?? undefined);
 		params.set('range', this.range);
 		params.set('period', this.period);
-		if (this.refreshSeconds > 0) params.set('refresh', String(this.refreshSeconds));
-		else params.delete('refresh');
+		// Always written: with a non-zero default, an absent parameter can no
+		// longer mean "off".
+		params.set('refresh', String(this.refreshSeconds));
 		return params;
 	}
 
@@ -112,8 +115,10 @@ class TimeRange {
 		} else {
 			this.reconcilePeriod();
 		}
-		const refresh = Number(params.get('refresh') ?? 0);
-		this.refreshSeconds = REFRESH_CHOICES.some((c) => c.seconds === refresh) ? refresh : 0;
+		const refresh = Number(params.get('refresh') ?? DEFAULT_REFRESH_SECONDS);
+		this.refreshSeconds = REFRESH_CHOICES.some((c) => c.seconds === refresh)
+			? refresh
+			: DEFAULT_REFRESH_SECONDS;
 	}
 }
 

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -237,6 +238,55 @@ func TestProbeExclusionKeepsLinesThatHaveNoPath(t *testing.T) {
 	}
 }
 
+// Logs Insights rejects unknown syntax at StartQuery with a 400, and the panel
+// degrades to a note rather than an error, so a query that only Go can parse
+// looks like "no errors in this window". A ternary and lower() both shipped
+// that way. Only the two error queries use levelFilter, so they are the pair.
+func TestErrorQueriesUseOnlyLogsInsightsSyntax(t *testing.T) {
+	q := LogQueries{Format: DefaultLogFormat()}
+	w := testWindow(t)
+
+	series, err := q.PodErrorSeries(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := q.PodErrorList(w, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, got := range map[string]Query{
+		"errors.series": series,
+		"errors.list":   list,
+	} {
+		if !strings.Contains(got.Text, "if(isWarn, 'warn', 'error') as level") {
+			t.Errorf("%s does not derive level with if():\n%s", name, got.Text)
+		}
+		// (?i) inside a regex literal is the only legitimate '?'.
+		if strings.Contains(strings.ReplaceAll(got.Text, "(?i)", ""), "?") {
+			t.Errorf("%s carries a '?' outside a regex literal:\n%s", name, got.Text)
+		}
+		if !strings.Contains(got.Text, "tolower(rawLevel)") {
+			t.Errorf("%s does not lowercase with tolower():\n%s", name, got.Text)
+		}
+	}
+
+	// PodErrorList selects the message field by name, and Logs Insights will
+	// not compile a query that also re-aliases it.
+	msg := DefaultLogFormat().MessageField
+	if !strings.Contains(list.Text, ", "+msg+",") {
+		t.Fatalf("list query no longer selects %q, so the message column would be empty:\n%s", msg, list.Text)
+	}
+	for name, got := range map[string]Query{
+		"errors.series": series,
+		"errors.list":   list,
+	} {
+		if strings.Contains(got.Text, msg+" as ") {
+			t.Errorf("%s re-aliases the selected message field:\n%s", name, got.Text)
+		}
+	}
+}
+
 // The list and the aggregate beside it must exclude identically, or the header
 // count and the visible rows describe different populations again.
 func TestProbeExclusionIsIdenticalAcrossListAndAggregate(t *testing.T) {
@@ -327,10 +377,22 @@ func TestPodBadStatusListSelectsTheCopyableColumns(t *testing.T) {
 	}
 	for _, want := range []string{
 		"kubernetes.pod_name as pod",
+<<<<<<< HEAD
 		"coalesce(log_processed.path, ginTarget) as requestTarget",
 		"coalesce(log_processed.status, ginStatusNumber) as status",
 		"coalesce(jsonLatencyMs, ginLatencyMs) as latencyMs",
 		"coalesce(log_processed.client_ip, ginClientIp) as clientIp",
+=======
+		// From the Kubernetes envelope, so present whatever the operator
+		// configured. They are what lets the panel offer a row detail on a
+		// fresh install instead of only where a User-Agent field was named.
+		"kubernetes.container_name as container",
+		"kubernetes.namespace_name as namespace",
+		"log_processed.path as path",
+		"log_processed.status as status",
+		"log_processed.latency_ms as latencyMs",
+		"log_processed.client_ip as clientIp",
+>>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 		"sort @timestamp desc",
 	} {
 		if !strings.Contains(got.Text, want) {
@@ -339,6 +401,7 @@ func TestPodBadStatusListSelectsTheCopyableColumns(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
 func TestAutoPresetBuildsGinAndJSONAliases(t *testing.T) {
 	q := LogQueries{Format: DefaultLogFormat()}
 	got, err := q.PodTraffic(testWindow(t))
@@ -386,6 +449,102 @@ func TestPresetRestrictsInsightsParsing(t *testing.T) {
 	}
 	if strings.Contains(jsonQuery.Text, "ginStatus") || strings.Contains(jsonQuery.Text, "parse dashboardMessage") {
 		t.Errorf("JSON preset still parses Gin fields:\n%s", jsonQuery.Text)
+=======
+// The series query decides whether the "비정상 응답" count is honest, and what
+// decides that is how many rows it asks for: Insights cuts a stats result at
+// InsightsMaxRows and reports nothing about having done so. Grouped by bucket
+// and status the row count is bounded by the window — grouped by path as well,
+// which it used to be for no reader at all, it is bounded by whatever a scanner
+// decides to request, and around eighty distinct paths was enough to truncate a
+// two-hour window silently.
+func TestPodBadStatusSeriesGroupsOnlyByWhatItPlots(t *testing.T) {
+	q := LogQueries{Format: DefaultLogFormat()}
+	got, err := q.PodBadStatusSeries(testWindow(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got.Text, "as path") {
+		t.Errorf("the series groups by path, which nothing plots and which uncaps its row count:\n%s", got.Text)
+	}
+	if !strings.Contains(got.Text, "as t, log_processed.status as status\n") {
+		t.Errorf("the series no longer groups by bucket and status:\n%s", got.Text)
+	}
+}
+
+// The breakdown is what the dropped grouping became. It has to describe exactly
+// the population the series and the list describe — otherwise the panel that
+// answers "which paths made up the 404s" is answering about different 404s —
+// and it has to come back whole.
+func TestPodBadStatusByPathMatchesTheOtherTwoQueries(t *testing.T) {
+	f := DefaultLogFormat()
+	f.Namespace = "prod"
+	f.ExcludePaths = []string{"/health"}
+	q := LogQueries{Format: f}
+
+	byPath, err := q.PodBadStatusByPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	series, err := q.PodBadStatusSeries(testWindow(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same filters, character for character. Two queries that select the same
+	// requests by two similar-looking filters is the failure this prevents.
+	for _, want := range []string{
+		"| filter kubernetes.namespace_name = 'prod'\n",
+		"| filter not ispresent(log_processed.path) or log_processed.path not in ['/health']\n",
+		"| filter ispresent(log_processed.status) and log_processed.status not in [200, 201]\n",
+	} {
+		if !strings.Contains(byPath.Text, want) || !strings.Contains(series.Text, want) {
+			t.Errorf("filter %q is not shared by both queries:\nbyPath:\n%s\nseries:\n%s",
+				want, byPath.Text, series.Text)
+		}
+	}
+
+	if !strings.Contains(byPath.Text, "stats count() as n, max(@timestamp) as lastTs by log_processed.status as status, log_processed.path as path\n") {
+		t.Errorf("byPath does not group by status and path with a last-seen:\n%s", byPath.Text)
+	}
+	// No bin(), or the row count goes back to buckets × statuses × paths and
+	// takes the ceiling with it.
+	if strings.Contains(byPath.Text, "bin(") {
+		t.Errorf("byPath bins, which is what made this grouping unaffordable:\n%s", byPath.Text)
+	}
+	// No limit clause: `sort n desc | limit N` cuts by (status, path) volume, so
+	// a flood of 404s would push a rare 403 out of the result entirely. The cut
+	// to a readable number of paths happens per code, in Go, after every code
+	// has been seen.
+	if strings.Contains(byPath.Text, "| limit") || byPath.Limit != 0 {
+		t.Errorf("byPath caps itself server-side, which drops whole status codes:\n%s", byPath.Text)
+	}
+	if strings.Contains(byPath.Text, "@message") {
+		t.Errorf("byPath selects the raw record:\n%s", byPath.Text)
+	}
+}
+
+// An access log carries a User-Agent only if the application wrote one, so the
+// field is named by the operator or not selected at all. Selecting it
+// unconditionally would open a detail view whose one row reads "—" on every
+// cluster that has not configured it.
+func TestPodBadStatusListSelectsAUserAgentOnlyWhenOneIsConfigured(t *testing.T) {
+	off := LogQueries{Format: DefaultLogFormat()}
+	got, err := off.PodBadStatusList(testWindow(t), 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got.Text, "userAgent") {
+		t.Errorf("an unconfigured User-Agent was queried anyway:\n%s", got.Text)
+	}
+
+	f := DefaultLogFormat()
+	f.UserAgentField = "user_agent"
+	got, err = LogQueries{Format: f}.PodBadStatusList(testWindow(t), 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.Text, "log_processed.user_agent as userAgent") {
+		t.Errorf("a configured User-Agent was not selected:\n%s", got.Text)
+>>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 	}
 }
 
@@ -447,9 +606,115 @@ func TestWAFQueries(t *testing.T) {
 			t.Errorf("blocked is missing %q:\n%s", want, blocked.Text)
 		}
 	}
-	list := q.BlockedList(100)
+
+	list := q.RecentList(100)
 	if !strings.Contains(list.Text, "sort @timestamp desc") {
-		t.Errorf("blocked list is not newest-first:\n%s", list.Text)
+		t.Errorf("recent list is not newest-first:\n%s", list.Text)
+	}
+	if !strings.Contains(list.Text, "action") {
+		t.Errorf("recent list does not report what the WAF did with each request:\n%s", list.Text)
+	}
+	// Filtered to blocks, an empty list means either "nothing was blocked" or
+	// "nothing arrived", and those are the two answers it exists to separate.
+	if strings.Contains(list.Text, "filter action") {
+		t.Errorf("recent list is filtered to one action:\n%s", list.Text)
+	}
+}
+
+// The row detail can only show what the row was given, and these are the fields
+// that answer what an operator asks after "it was blocked": by what kind of
+// rule, from what client calling itself what, and what the WAF sent back.
+func TestWAFRecentListCarriesTheDetailFields(t *testing.T) {
+	list := WAFQueries{Headers: DefaultWAFHeaders()}.RecentList(300)
+	for _, want := range []string{
+		`parse @message /"name":"(?i)User-Agent","value":"(?<uaCapture>[^"]*)"/`,
+		"uaCapture as userAgent",
+		"terminatingRuleType as ruleType",
+		"responseCodeSent as responseCode",
+		"httpRequest.uri as uri",
+		"httpRequest.args as args",
+	} {
+		if !strings.Contains(list.Text, want) {
+			t.Errorf("recent list is missing %q:\n%s", want, list.Text)
+		}
+	}
+}
+
+// The detail exists so an operator does not have to open the console. It does
+// not exist to ship the console's payload: a WAF record is roughly a kilobyte
+// once its header array and rule-group lists are counted, against a couple of
+// hundred bytes for the named fields, and this list is refetched on every poll.
+// Selecting @message costs the same scan and multiplies what crosses the wire,
+// which is exactly why it looks like a free improvement to someone later.
+// captureRe finds the ephemeral fields a query's parse commands define.
+var captureRe = regexp.MustCompile(`\(\?P?<([A-Za-z_][A-Za-z0-9_]*)>`)
+
+// Logs Insights reads a name in `fields` as a definition, not a selection, so a
+// query that lists its own parse capture there defines it twice and is rejected
+// before it runs — MalformedQueryException, "Ephemeral field is already
+// defined". A capture may be used and may be aliased into a new name; it may
+// not be named again.
+//
+// This is the rule that has now bitten three separate queries, so it gets a
+// test that reads the query rather than a comment asking the next person to
+// remember.
+func TestWAFRecentListAliasesItsParseCaptureRatherThanListingIt(t *testing.T) {
+	list := WAFQueries{Headers: DefaultWAFHeaders()}.RecentList(300)
+	captures := captureRe.FindAllStringSubmatch(list.Text, -1)
+	if len(captures) == 0 {
+		t.Fatalf("no parse capture at all, so the User-Agent cannot arrive:\n%s", list.Text)
+	}
+	for _, c := range captures {
+		name := c[1]
+		for _, listed := range []string{", " + name + "\n", ", " + name + ",", " " + name + ",\n"} {
+			if strings.Contains(list.Text, listed) {
+				t.Errorf("parse capture %q is also listed in fields, which Insights rejects:\n%s",
+					name, list.Text)
+			}
+		}
+		// Aliased, or it never becomes a column and the detail shows nothing.
+		if !strings.Contains(list.Text, name+" as ") {
+			t.Errorf("parse capture %q never reaches a column:\n%s", name, list.Text)
+		}
+	}
+}
+
+func TestWAFRecentListDoesNotSelectTheRawRecord(t *testing.T) {
+	list := WAFQueries{Headers: DefaultWAFHeaders()}.RecentList(300)
+	for _, banned := range []string{"fields @message", ", @message", "@message,"} {
+		if strings.Contains(list.Text, banned) {
+			t.Errorf("recent list selects the raw record via %q:\n%s", banned, list.Text)
+		}
+	}
+}
+
+// Without the action in the grouping, one number counted the requests that
+// reached the application and the requests the WAF stopped, together.
+func TestWAFBreakdownsSplitByAction(t *testing.T) {
+	q := WAFQueries{Headers: DefaultWAFHeaders()}
+	header, err := q.ByHeader("User-Agent", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, got := range map[string]Query{
+		"byMethod": q.ByMethod(),
+		"byPath":   q.ByPath(20),
+		"byHeader": header,
+	} {
+		for _, want := range []string{", action", "max(@timestamp) as lastTs", "sort n desc"} {
+			if !strings.Contains(got.Text, want) {
+				t.Errorf("%s is missing %q:\n%s", name, want, got.Text)
+			}
+		}
+	}
+
+	// The header breakdown's stats has to stay piped after its parse/filter.
+	if strings.HasPrefix(header.Text, "|") {
+		t.Errorf("byHeader starts with a pipe:\n%s", header.Text)
+	}
+	if !strings.Contains(header.Text, "| stats count()") {
+		t.Errorf("byHeader's stats is not piped after the parse:\n%s", header.Text)
 	}
 }
 

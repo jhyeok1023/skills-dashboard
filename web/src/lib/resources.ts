@@ -29,6 +29,18 @@ export function appName(r: Resource): string {
 	return r.extra?.friendlyName || r.name;
 }
 
+/**
+ * What a lookup that found nothing says.
+ *
+ * Saying it at all is the point: an empty result used to render as empty space,
+ * which is also what a lookup nobody ran looks like, and what a lookup that
+ * failed looked like on the fields with no error line. It lives here so the
+ * picker and the settings page cannot come to spell it two ways.
+ */
+export function emptyFor(noun: string): string {
+	return `조회했지만 이 리전에 ${noun}이(가) 없습니다. 리전과 IAM 권한을 확인하세요.`;
+}
+
 function groupLabelFor(r: Resource): string {
 	return r.extra?.loadBalancerName || r.extra?.loadBalancer || UNGROUPED_LABEL;
 }
@@ -61,25 +73,37 @@ export function groupByLoadBalancer(resources: Resource[]): ResourceGroup[] {
 }
 
 /**
- * Whether a resource answers to a typed query.
+ * Whether a resource answers to an already-trimmed, already-lowered query.
  *
- * The raw dimension is searched alongside the friendly name because two
- * namespaces can host the same application — `k8s-default-product-…` and
+ * Every discovered attribute is searched, not a per-kind allowlist: `engine` is
+ * RDS's, `scope` is the Web ACL's, and a list naming some of them is a list that
+ * silently fails to find the rest — typing CLOUDFRONT used to match nothing.
+ * The raw name and dimension are searched alongside the friendly name because
+ * two namespaces can host the same application — `k8s-default-product-…` and
  * `k8s-staging-product-…` both shorten to `product` — so the friendly name is
  * not always enough to find the one that was meant.
  */
+function matches(r: Resource, q: string): boolean {
+	if (r.name.toLowerCase().includes(q) || r.id.toLowerCase().includes(q)) return true;
+	for (const v of Object.values(r.extra ?? {})) {
+		if (v.toLowerCase().includes(q)) return true;
+	}
+	return false;
+}
+
+/** Whether a resource answers to a typed query. */
 export function matchesQuery(r: Resource, query: string): boolean {
 	const q = query.trim().toLowerCase();
-	if (!q) return true;
-	return [r.extra?.friendlyName, r.name, r.id, r.extra?.loadBalancerName, r.extra?.engine]
-		.filter((s): s is string => Boolean(s))
-		.some((s) => s.toLowerCase().includes(q));
+	return !q || matches(r, q);
 }
 
 /** Drops the resources that do not match, then the groups left empty. */
 export function filterGroups(groups: ResourceGroup[], query: string): ResourceGroup[] {
-	if (!query.trim()) return groups;
+	// Normalized once for the whole list rather than once per resource: this
+	// runs on every keystroke, over every row.
+	const q = query.trim().toLowerCase();
+	if (!q) return groups;
 	return groups
-		.map((g) => ({ ...g, items: g.items.filter((r) => matchesQuery(r, query)) }))
+		.map((g) => ({ ...g, items: g.items.filter((r) => matches(r, q)) }))
 		.filter((g) => g.items.length > 0);
 }

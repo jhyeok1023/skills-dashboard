@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
 	colorVar,
 	copyableValue,
+	dashPattern,
+	dashSwatch,
 	formatBytes,
 	formatDuration,
 	formatValue,
@@ -96,6 +98,40 @@ describe('colorVar', () => {
 
 	it('falls back when no colour was supplied', () => {
 		expect(colorVar(undefined)).toBe('var(--label-secondary)');
+	});
+});
+
+describe('dashPattern', () => {
+	it('leaves an unset dash solid', () => {
+		// Not [] — uPlot reads an empty array as segments of zero length and
+		// draws no line at all, so every panel that never sets a dash would
+		// come back blank.
+		expect(dashPattern(undefined)).toBeUndefined();
+		expect(dashPattern('')).toBeUndefined();
+	});
+
+	it('gives each named pattern its own segments', () => {
+		const dashed = dashPattern('dashed');
+		const dotted = dashPattern('dotted');
+		expect(dashed).toBeDefined();
+		expect(dotted).toBeDefined();
+		expect(dashed).not.toEqual(dotted);
+	});
+});
+
+describe('dashSwatch', () => {
+	it('leaves a solid series a plain block of colour', () => {
+		expect(dashSwatch('var(--system-blue)', undefined)).toBe('var(--system-blue)');
+	});
+
+	it('breaks the swatch up so the legend carries the pattern too', () => {
+		// A legend that shows only colour stops meaning anything the moment two
+		// series share one, which is exactly what a dash is there to survive.
+		const swatch = dashSwatch('var(--system-blue)', 'dashed');
+		expect(swatch).toContain('repeating-linear-gradient');
+		expect(swatch).toContain('var(--system-blue)');
+		expect(swatch).toContain('transparent');
+		expect(dashSwatch('var(--system-blue)', 'dotted')).not.toBe(swatch);
 	});
 });
 

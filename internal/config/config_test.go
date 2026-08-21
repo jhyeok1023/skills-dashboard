@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -63,6 +65,56 @@ func TestLoadEnvFileMissingIsNotAnError(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("got %v, want empty", got)
+	}
+}
+
+func TestEnvFileCandidates(t *testing.T) {
+	got := envFileCandidates("/opt/dash", "/home/u/.skills-dashboard")
+	want := []string{"/opt/dash/.env", "/home/u/.skills-dashboard/.env"}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	// The binary living in the config directory must not produce the same
+	// candidate twice, and the working directory is never one of them.
+	if got := envFileCandidates("/opt/dash", "/opt/dash"); len(got) != 1 {
+		t.Errorf("duplicate directories gave %v, want one candidate", got)
+	}
+	for _, p := range envFileCandidates("", "") {
+		t.Errorf("unknown directories still produced %q", p)
+	}
+}
+
+func TestResolveEnvFileRejectsAPathThatIsNotThere(t *testing.T) {
+	// A named file that does not exist used to be swallowed, leaving the
+	// operator with "missing AWS_ACCESS_KEY_ID" for what was really a typo.
+	if _, _, err := ResolveEnvFile(filepath.Join(t.TempDir(), "absent")); err == nil {
+		t.Fatal("a named .env that does not exist was accepted")
+	}
+
+	dir := t.TempDir()
+	p := writeFile(t, dir, ".env", "AWS_REGION=ap-northeast-2\n")
+	got, _, err := ResolveEnvFile(p)
+	if err != nil || got != p {
+		t.Fatalf("ResolveEnvFile(%q) = %q, %v", p, got, err)
+	}
+}
+
+func TestResolveEnvFileReportsWhereItLooked(t *testing.T) {
+	// Nothing exists at either candidate here, which is not an error — the
+	// process environment may carry the values — but the caller has to be able
+	// to say where it looked.
+	path, tried, err := ResolveEnvFile("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path == "" && len(tried) == 0 {
+		t.Error("no .env found and no candidates reported")
+	}
+	for _, p := range tried {
+		if !filepath.IsAbs(p) {
+			t.Errorf("candidate %q is not absolute; a relative path is unusable in a message", p)
+		}
 	}
 }
 
@@ -179,6 +231,76 @@ func TestValidateFillsDefaultsAndRejectsBadInput(t *testing.T) {
 	}
 }
 
+// The check URL is the one address the dashboard itself requests, so it is
+// checked as an address and not just as text — and it is checked by the same
+// rule on both paths, so the settings page refuses exactly what the loader
+// would otherwise have discarded.
+func TestCheckURLIsRefusedOnSaveAndDroppedOnLoad(t *testing.T) {
+	for _, bad := range []string{
+		"file:///etc/passwd",
+		"ftp://example.com/",
+		"not a url at all",
+		"https://",
+		"://example.com",
+	} {
+		c := Default()
+		c.Check.URL = bad
+		if err := c.Validate(); err == nil {
+			t.Errorf("Validate accepted check.url %q", bad)
+		}
+
+		c = Default()
+		c.Check.URL = bad
+		notes := c.Repair()
+		if len(notes) == 0 {
+			t.Errorf("Repair said nothing about check.url %q", bad)
+		}
+		if c.Check.URL != "" {
+			t.Errorf("Repair kept an unusable check.url %q", c.Check.URL)
+		}
+	}
+
+	for _, ok := range []string{
+		"http://127.0.0.1:8080/health",
+		"https://api.example.com/healthz?deep=1",
+	} {
+		c := Default()
+		c.Check.URL = ok
+		if err := c.Validate(); err != nil {
+			t.Errorf("Validate rejected check.url %q: %v", ok, err)
+		}
+	}
+
+	bad := Default()
+	bad.Check.URL = "https://example.com/"
+	bad.Check.ExpectStatus = 99
+	if err := bad.Validate(); err == nil {
+		t.Error("accepted an expectStatus that is not an HTTP status code")
+	}
+}
+
+// Zero means "any 2xx", which is what most people mean by "it works".
+func TestHealthCheckOK(t *testing.T) {
+	any2xx := HealthCheck{}
+	for _, s := range []int{200, 201, 204, 299} {
+		if !any2xx.OK(s) {
+			t.Errorf("status %d not treated as healthy by default", s)
+		}
+	}
+	for _, s := range []int{199, 300, 404, 503} {
+		if any2xx.OK(s) {
+			t.Errorf("status %d treated as healthy by default", s)
+		}
+	}
+
+	// A service that answers 401 to an unauthenticated probe is still up, so
+	// the expected code is settable and then it is the only healthy one.
+	only401 := HealthCheck{ExpectStatus: 401}
+	if !only401.OK(401) || only401.OK(200) {
+		t.Error("an explicit expectStatus is not the only code accepted")
+	}
+}
+
 // A load balancer ARN pasted into the settings page passes the metric SEARCH
 // value regex and then matches nothing, so the panel renders empty with no
 // explanation. Converting it on the way in is what stops that from happening.
@@ -282,6 +404,38 @@ func TestStoreGetReturnsAnIndependentCopy(t *testing.T) {
 
 	if got := s.Get(); got.TargetGroups[0] != "one" || got.ClusterName != "" {
 		t.Errorf("mutating a returned config changed the store: %+v", got)
+	}
+}
+
+// A fresh install has no config.json, so Default() supplies the answer to
+// /api/config with nothing selected yet. Nil slices marshal to `null`, the
+// browser's Config declares these fields as `string[]`, and the settings page
+// calls .filter on one before it renders anything — so a `null` here threw
+// during mount and took every resource field off the page. That looked like a
+// dashboard with no settings rather than like a bug, which is why it survived.
+func TestStoreNeverHandsOutNullLists(t *testing.T) {
+	s, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := json.Marshal(s.Get())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+
+	for _, field := range []string{
+		"targetGroups", "rdsProxies", "webAcls", "wafHeaders", "okStatuses", "excludePaths",
+	} {
+		if strings.Contains(got, `"`+field+`":null`) {
+			t.Errorf("%s is null; the settings page cannot survive that\n%s", field, got)
+		}
+	}
+	for _, want := range []string{`"targetGroups":[]`, `"rdsProxies":[]`, `"webAcls":[]`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %s in %s", want, got)
+		}
 	}
 }
 
