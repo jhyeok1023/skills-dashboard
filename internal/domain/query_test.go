@@ -346,16 +346,25 @@ func TestAutoPresetBuildsGinAndJSONAliases(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"parse message",
+		"parse dashboardMessage",
 		"(?<ginStatus>",
+		`\|(?:\x1b\[[0-9;]*m)*\s*(?:(?<ginHours>`,
+		`"?(?<ginTarget>`,
 		"coalesce(log_processed.app, kubernetes.container_name) as app",
 		"ginLatencyUnit = 'ns'",
 		"case(",
 		"parse requestTarget",
 	} {
+		want = strings.ReplaceAll(want, `\\`, `\`)
 		if !strings.Contains(got.Text, want) {
 			t.Errorf("auto query is missing %q:\n%s", want, got.Text)
 		}
+	}
+	if strings.Contains(got.Text, `\\x1b`) || strings.Contains(got.Text, `\\d`) {
+		t.Errorf("query contains double-escaped regex tokens:\n%s", got.Text)
+	}
+	if !strings.Contains(got.Text, `\d{4}\/\d{2}\/\d{2}`) {
+		t.Errorf("query does not escape date delimiters:\n%s", got.Text)
 	}
 }
 
@@ -375,7 +384,7 @@ func TestPresetRestrictsInsightsParsing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(jsonQuery.Text, "ginStatus") || strings.Contains(jsonQuery.Text, "parse message") {
+	if strings.Contains(jsonQuery.Text, "ginStatus") || strings.Contains(jsonQuery.Text, "parse dashboardMessage") {
 		t.Errorf("JSON preset still parses Gin fields:\n%s", jsonQuery.Text)
 	}
 }
@@ -399,6 +408,9 @@ func TestPodErrorQueriesCoverBothLevels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(list.Text, "as message") || strings.Contains(list.Text, "message as raw") {
+		t.Errorf("query redefines the discovered message field:\n%s", list.Text)
+	}
 	if !strings.Contains(list.Text, "limit 300") {
 		t.Errorf("error list is uncapped:\n%s", list.Text)
 	}
@@ -407,6 +419,9 @@ func TestPodErrorQueriesCoverBothLevels(t *testing.T) {
 	}
 	if !strings.Contains(list.Text, "not ispresent(status)") {
 		t.Errorf("access lines can leak into the ERROR panel:\n%s", list.Text)
+	}
+	if !strings.Contains(list.Text, "tolower(rawLevel)") || strings.Contains(list.Text, "fields lower(rawLevel)") {
+		t.Errorf("error query uses an unsupported case function:\n%s", list.Text)
 	}
 }
 

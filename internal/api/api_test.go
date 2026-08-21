@@ -848,6 +848,22 @@ func TestUnknownPanelAndPageAreRejected(t *testing.T) {
 	}
 }
 
+func TestCanceledPageRequestStopsBeforeBuildingPanels(t *testing.T) {
+	svc, h := newTestService(t)
+	metrics := svc.Clients.CW.(*stubMetrics)
+	req := httptest.NewRequest(http.MethodGet, "/api/page/overview", nil)
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+
+	h.ServeHTTP(httptest.NewRecorder(), req.WithContext(ctx))
+
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	if metrics.calls != 0 {
+		t.Errorf("canceled request made %d metric calls", metrics.calls)
+	}
+}
+
 func TestMissingCredentialsExplainThemselves(t *testing.T) {
 	svc, _ := newTestService(t)
 	svc.CredentialError = fmt.Errorf("missing AWS_ACCESS_KEY_ID")

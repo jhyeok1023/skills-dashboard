@@ -348,7 +348,7 @@ func (f *LogFormat) applyText(line *LogLine, msg string) {
 
 var (
 	ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
-	ginPattern  = regexp.MustCompile(`^\[GIN\]\s+\d{4}/\d{2}/\d{2}\s+-\s+\d{2}:\d{2}:\d{2}\s+\|\s*(?P<status>\d{3})\s*\|\s*(?P<latency>(?:\d+h)?(?:\d+m)?[\d.]+(?:ns|µs|μs|us|ms|s))\s*\|\s*(?P<client_ip>\S+)\s*\|\s*(?P<method>[A-Z]+)\s+"(?P<target>(?:\\.|[^"])*)"`)
+	ginPattern  = regexp.MustCompile(`^\[GIN\]\s+\d{4}/\d{2}/\d{2}\s+-\s+\d{2}:\d{2}:\d{2}\s+\|\s*(?P<status>\d{3})\s*\|\s*(?P<latency>(?:\d+h)?(?:\d+m)?[\d.]+(?:ns|µs|μs|us|ms|s))\s*\|\s*(?P<client_ip>\S+)\s*\|\s*(?P<method>[A-Z]+)\s+(?:"(?P<quoted_target>(?:\\.|[^"])*)"|(?P<plain_target>\S+))`)
 )
 
 func applyGin(line *LogLine, msg string) bool {
@@ -365,9 +365,12 @@ func applyGin(line *LogLine, msg string) bool {
 	line.Status, _ = strconv.Atoi(values["status"])
 	line.Method = values["method"]
 	line.ClientIP = values["client_ip"]
-	target := values["target"]
-	if unquoted, err := strconv.Unquote(`"` + target + `"`); err == nil {
-		target = unquoted
+	target := values["plain_target"]
+	if quoted := values["quoted_target"]; quoted != "" {
+		target = quoted
+		if unquoted, err := strconv.Unquote(`"` + quoted + `"`); err == nil {
+			target = unquoted
+		}
 	}
 	line.RequestTarget = target
 	line.Path = requestPath(target)

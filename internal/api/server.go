@@ -324,6 +324,9 @@ func (s *Service) handlePanel(w http.ResponseWriter, r *http.Request) {
 	payload := domain.NewPayload(win)
 	panel, err := build(rc)
 	if err != nil {
+		if rc.ctx.Err() != nil {
+			return
+		}
 		upstream(w, err)
 		return
 	}
@@ -360,12 +363,18 @@ func (s *Service) handlePage(w http.ResponseWriter, r *http.Request) {
 	// underneath is already concurrent, and a failing panel must not blank the
 	// ones beside it.
 	for _, pid := range ids {
+		if rc.ctx.Err() != nil {
+			return
+		}
 		build, ok := builders[pid]
 		if !ok {
 			continue
 		}
 		panel, err := build(rc)
 		if err != nil {
+			if rc.ctx.Err() != nil {
+				return
+			}
 			s.log().Warn("panel failed", "panel", pid, "error", err)
 			payload.Add(&domain.Panel{
 				ID:       pid,

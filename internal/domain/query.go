@@ -95,7 +95,7 @@ func (q LogQueries) processedField(name string) (string, error) {
 	return Field(q.Format.ProcessedField + "." + name)
 }
 
-const ginInsightsPattern = `(?:\x1b\[[0-9;]*m)*\[GIN\]\s+\d{4}/\d{2}/\d{2}\s+-\s+\d{2}:\d{2}:\d{2}\s+\|(?:\x1b\[[0-9;]*m)*\s*(?<ginStatus>\d{3})\s*(?:\x1b\[[0-9;]*m)*\|\s*(?:(?<ginHours>\d+)h)?(?:(?<ginMinutes>\d+)m)?(?<ginLatency>[\d.]+)(?<ginLatencyUnit>ns|µs|μs|us|ms|s)\s*\|\s*(?<ginClientIp>\S+)\s*\|(?:\x1b\[[0-9;]*m)*\s*(?<ginMethod>[A-Z]+)\s*(?:\x1b\[[0-9;]*m)*\s+"(?<ginTarget>(?:\\.|[^"])*)"`
+const ginInsightsPattern = `(?:\x1b\[[0-9;]*m)*\[GIN\]\s+\d{4}/\d{2}/\d{2}\s+-\s+\d{2}:\d{2}:\d{2}\s+\|(?:\x1b\[[0-9;]*m)*\s*(?<ginStatus>\d{3})\s*(?:\x1b\[[0-9;]*m)*\|(?:\x1b\[[0-9;]*m)*\s*(?:(?<ginHours>\d+)h)?(?:(?<ginMinutes>\d+)m)?(?<ginLatency>[\d.]+)(?<ginLatencyUnit>ns|µs|μs|us|ms|s)\s*(?:\x1b\[[0-9;]*m)*\|\s*(?<ginClientIp>\S+)\s*\|(?:\x1b\[[0-9;]*m)*\s*(?<ginMethod>[A-Z]+)\s*(?:\x1b\[[0-9;]*m)*\s+"?(?<ginTarget>(?:\\.|[^"\s])+?)"?(?:\s|$)`
 
 // accessPreamble gives structured JSON and Gin access lines one set of field
 // names. Every query reads those aliases, so auto detection cannot make the
@@ -126,9 +126,11 @@ func (q LogQueries) accessPreamble() (string, error) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "fields @timestamp, coalesce(%s, @message) as message\n", msg)
+	fmt.Fprintf(&b, "fields @timestamp, coalesce(%s, @message) as dashboardMessage\n", msg)
 	if q.Format.Preset != LogPresetJSON {
-		fmt.Fprintf(&b, "| parse message /%s/\n", ginInsightsPattern)
+		pattern := strings.ReplaceAll(ginInsightsPattern, `\\`, `\`)
+		pattern = strings.ReplaceAll(pattern, "/", `\/`)
+		fmt.Fprintf(&b, "| parse dashboardMessage /%s/\n", pattern)
 	}
 
 	var calculated []string
@@ -349,7 +351,7 @@ func (q LogQueries) PodErrorList(w Window, limit int) (Query, error) {
 
 	var b strings.Builder
 	b.WriteString(preamble)
-	b.WriteString("| fields @timestamp, message, kubernetes.pod_name as pod, kubernetes.container_name as container\n")
+	b.WriteString("| fields @timestamp, dashboardMessage, kubernetes.pod_name as pod, kubernetes.container_name as container\n")
 	b.WriteString(ns)
 	b.WriteString(probes)
 	b.WriteString(filter)
@@ -364,7 +366,7 @@ func (q LogQueries) PodErrorList(w Window, limit int) (Query, error) {
 func (q LogQueries) levelFilter() (string, error) {
 	var b strings.Builder
 	// Normalise into two buckets so the series has a stable set of keys.
-	b.WriteString("| fields lower(rawLevel) as lvl, message as raw\n")
+	b.WriteString("| fields tolower(rawLevel) as lvl, dashboardMessage as raw\n")
 	b.WriteString("| filter lvl in ['error', 'err', 'fatal', 'panic', 'warn', 'warning']\n")
 	b.WriteString("    or (lvl = '' and not ispresent(status) and raw like /(?i)\\b(error|fatal|panic|warn|warning|oomkilled)\\b/)\n")
 	b.WriteString("| fields if(lvl in ['warn', 'warning'] or (lvl = '' and not ispresent(status) and raw like /(?i)\\b(warn|warning)\\b/), 'warn', 'error') as level\n")

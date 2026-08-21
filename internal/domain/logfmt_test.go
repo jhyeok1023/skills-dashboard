@@ -148,6 +148,37 @@ func TestParseGinAccessLine(t *testing.T) {
 	}
 }
 
+func TestParseGinDefaultFormatsByRelease(t *testing.T) {
+	tests := []struct {
+		version string
+		raw     string
+		target  string
+		wantMS  float64
+	}{
+		{"v1.2", `[GIN] 2026/08/21 - 11:00:00 | 200 |       1.5ms |        10.0.0.3 | GET     /v1/users`, "/v1/users", 1.5},
+		{"v1.5", `[GIN] 2026/08/21 - 11:00:00 | 201 |       250µs |        10.0.0.4 | POST    /v1/users?dry=true`, "/v1/users?dry=true", 0.25},
+		{"v1.6", `[GIN] 2026/08/21 - 11:00:00 | 202 |          2ms |        10.0.0.5 | PUT     "/v1/users/7"`, "/v1/users/7", 2},
+		{"v1.10.1", `[GIN] 2026/08/21 - 11:00:00 | 204 |       3.25ms |        10.0.0.6 | DELETE  "/v1/users/7?hard=true"`, "/v1/users/7?hard=true", 3.25},
+		{"v1.12.0", "[GIN] 2026/08/21 - 11:00:00 |\x1b[97;42m 200 \x1b[0m|\x1b[90;47m   12.34ms \x1b[0m|        10.0.0.7 |\x1b[97;44m GET     \x1b[0m \"/v1/latest?q=gin\"", "/v1/latest?q=gin", 12.34},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.version, func(t *testing.T) {
+			f := DefaultLogFormat()
+			line, err := f.Parse(tc.raw, time.Time{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !line.HasAccess || line.RequestTarget != tc.target {
+				t.Errorf("target = %q, access = %v", line.RequestTarget, line.HasAccess)
+			}
+			if line.LatencyMS == nil || *line.LatencyMS != tc.wantMS {
+				t.Errorf("latency = %v, want %vms", line.LatencyMS, tc.wantMS)
+			}
+		})
+	}
+}
+
 func TestParseGinNormalisesDurationUnitsAndColors(t *testing.T) {
 	tests := []struct {
 		duration string

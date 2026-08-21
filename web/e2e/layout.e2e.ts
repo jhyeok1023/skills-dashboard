@@ -243,6 +243,21 @@ test('changing the range updates the URL and refetches', async ({ page }) => {
 	await expect.poll(() => requests.some((u) => u.includes('range=4h'))).toBe(true);
 });
 
+test('metadata updates do not duplicate an active page request', async ({ page }) => {
+	await mockApi(page);
+	let requests = 0;
+	await page.route('**/api/page/overview*', async (route) => {
+		requests += 1;
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		await route.fallback();
+	});
+
+	await page.goto('/');
+	await expect(page.locator('[data-panel]').first()).toBeVisible();
+	await page.waitForTimeout(400);
+	expect(requests).toBe(1);
+});
+
 test('the pod log namespace filter updates the URL and refetches', async ({ page }) => {
 	await open(page, '/logs/pod');
 

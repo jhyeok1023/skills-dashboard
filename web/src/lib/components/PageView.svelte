@@ -31,6 +31,7 @@
 	let error = $state<ApiFailure | null>(null);
 	let loading = $state(false);
 	let controller: AbortController | null = null;
+	let requestedKey = '';
 	let namespaceMode = $state<'default' | 'all' | 'custom'>('default');
 	let namespaceDraft = $state('');
 	let appliedNamespace = $state('');
@@ -56,7 +57,8 @@
 
 	async function load() {
 		controller?.abort();
-		controller = new AbortController();
+		const current = new AbortController();
+		controller = current;
 		loading = true;
 		error = null;
 		try {
@@ -64,7 +66,7 @@
 				pageId,
 				timeRange.range,
 				timeRange.period,
-				controller.signal,
+				current.signal,
 				namespaceFilter ? appliedNamespace : ''
 			);
 		} catch (e) {
@@ -72,7 +74,7 @@
 			error = e instanceof ApiFailure ? e : new ApiFailure(0, String(e));
 			payload = null;
 		} finally {
-			loading = false;
+			if (controller === current) loading = false;
 		}
 	}
 
@@ -104,8 +106,7 @@
 		const range = timeRange.range;
 		const period = timeRange.period;
 		const namespace = namespaceFilter ? appliedNamespace : '';
-		void timeRange.nonce;
-		void pageId;
+		const nonce = timeRange.nonce;
 
 		untrack(() => {
 			const params = timeRange.toSearchParams();
@@ -123,8 +124,13 @@
 		});
 
 		if (!timeRange.isValid(range, period)) return;
+		const key = `${pageId}\u0000${range}\u0000${period}\u0000${namespace}\u0000${nonce}`;
+		if (key === requestedKey) return;
+		requestedKey = key;
 		void load();
 	});
+
+	$effect(() => () => controller?.abort());
 
 	// Auto-refresh, off unless the operator asks for it.
 	$effect(() => {

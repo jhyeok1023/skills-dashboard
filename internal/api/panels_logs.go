@@ -459,7 +459,7 @@ func (s *Service) buildPodErrorPanel(rc requestCtx) (*domain.Panel, error) {
 	var rows []domain.Row
 	if res, ok := results[list.ID]; ok {
 		for _, r := range res.Rows {
-			msg := r["message"]
+			msg := r["dashboardMessage"]
 			if msg == "" {
 				msg = r["@message"]
 			}
