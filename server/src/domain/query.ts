@@ -5,6 +5,16 @@
 // 이름이 쿼리에 넣을 수 있는 것인지 판단하는 자리.
 
 /**
+ * Query 는 Insights 쿼리 하나다. id 로 결과를 되찾고, limit 은 잘림 판정에
+ * 쓰이므로 쿼리 문자열의 `| limit` 과 같은 값이어야 한다.
+ */
+export interface Query {
+	id: string;
+	text: string;
+	limit: number;
+}
+
+/**
  * headerNameRe 는 운영자가 준 헤더 이름을 RFC 9110 이 필드 이름에 허용하는
  * 문자로 묶는다. 그래야 아래 parse 패턴에 그대로 끼워 넣어도 이스케이프
  * 사고가 나지 않는다.

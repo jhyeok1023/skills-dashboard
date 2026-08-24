@@ -149,7 +149,17 @@ await build({
 	keepNames: true,
 	sourcemap: false,
 	logLevel: 'info',
-	banner: { js: '#!/usr/bin/env node' },
+	// CJS 의존성 몇 개가 런타임에 require 를 부른다(@smithy 압축 미들웨어가
+	// node:zlib 을 그렇게 가져온다). ESM 번들에는 require 가 없으므로 esbuild 가
+	// "Dynamic require is not supported" 를 던지는 shim 을 심는데, 그 shim 은
+	// 모듈 스코프에 require 가 있으면 그것을 쓴다. 여기서 하나 만들어 준다.
+	banner: {
+		js: [
+			'#!/usr/bin/env node',
+			"import { createRequire as __nodeCreateRequire } from 'node:module';",
+			'const require = __nodeCreateRequire(import.meta.url);'
+		].join('\n')
+	},
 	plugins: [virtualAssetsPlugin(assets)]
 });
 

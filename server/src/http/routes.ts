@@ -10,6 +10,7 @@ import type { Service } from '../service.ts';
 import { mountWeb } from '../web/handler.ts';
 import { fail, json } from './respond.ts';
 import {
+	handleDiscovery,
 	handleGetConfig,
 	handleIdentity,
 	handleLogFormatPreview,
@@ -46,6 +47,8 @@ export function createApp(service: Service): Hono {
 	app.get('/api/config', () => handleGetConfig(service));
 	app.put('/api/config', (c) => handlePutConfig(service, c));
 	app.post('/api/logfmt/preview', (c) => handleLogFormatPreview(service, c));
+
+	app.get('/api/discovery/:kind', (c) => handleDiscovery(service, c));
 
 	mountWeb(app);
 	return app;

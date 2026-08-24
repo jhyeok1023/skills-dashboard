@@ -10,6 +10,10 @@ import type { AddressInfo } from 'node:net';
 
 import { getRequestListener } from '@hono/node-server';
 
+import { Cache } from './aws/cache.ts';
+import { globalWAFRegion, newClients, whoAmI } from './aws/client.ts';
+import { InsightsRunner } from './aws/insights.ts';
+import { MetricFetcher } from './aws/metrics.ts';
 import { ConfigStore, configPath } from './config/store.ts';
 import { loadCredentials, redacted, resolveEnvFile, validateCredentials } from './config/env.ts';
 import { parseFlags } from './flags.ts';
@@ -31,7 +35,12 @@ async function main(): Promise<void> {
 	} catch (err) {
 		throw new Error(`read the config at ${cfgPath}: ${message(err)}`);
 	}
-	const service = newService(store);
+	const cfg = store.get();
+	const cache = new Cache({
+		ttlMs: cfg.limits.cacheTtlSeconds * 1000,
+		errorTtlMs: 5_000
+	});
+	const service = newService(store, cache);
 
 	// 저장된 설정이 포기해야 했던 것은 두 번 말한다. 터미널을 보고 있는
 	// 사람에게 여기서 한 번, 설정 화면을 위해 /api/meta 로 한 번 — 값을 다시
@@ -41,6 +50,7 @@ async function main(): Promise<void> {
 	}
 
 	loadCredentialsInto(service, flags.env);
+	await connectAWS(service);
 
 	const app = createApp(service);
 
@@ -106,14 +116,80 @@ function loadCredentialsInto(service: ReturnType<typeof newService>, named: stri
 					: message(err);
 			throw new Error(detail);
 		}
-		// TODO(aws): 여기서 클라이언트를 만들고 WhoAmI 로 신원을 확인한다.
-		// 그때까지 AWS 를 쓰는 엔드포인트는 requireAWS 에서 503 으로 막힌다.
-		logger.info('credentials accepted', { key: redacted(creds), region: creds.region });
+		service.pendingCredentials = creds;
 	} catch (err) {
 		service.credentialError = err instanceof Error ? err : new Error(String(err));
 	}
 
 	if (service.credentialError !== null) {
+		logger.warn('AWS is unavailable; the UI will explain what to configure', {
+			error: service.credentialError,
+			envFile: service.envFile
+		});
+	}
+}
+
+/**
+ * connectAWS 는 클라이언트를 만들고 자격증명이 실제로 통하는지 확인한다.
+ *
+ * 여기서도 실패는 들고 간다. 잘못된 키 하나로 프로세스가 죽으면 그것을 고칠
+ * 설정 화면에 닿을 수 없다.
+ */
+async function connectAWS(service: ReturnType<typeof newService>): Promise<void> {
+	const creds = service.pendingCredentials;
+	if (creds === undefined) return;
+	service.pendingCredentials = undefined;
+
+	const store = service.store;
+	let cfg = store.get();
+
+	try {
+		const clients = newClients(creds, cfg.wafRegion === '' ? globalWAFRegion : cfg.wafRegion);
+		service.clients = clients;
+		service.metrics = new MetricFetcher(clients.cw);
+		service.insights = new InsightsRunner(clients.logs, {
+			concurrency: cfg.limits.insightsConcurrency,
+			timeoutMs: cfg.limits.queryTimeoutSeconds * 1000
+		});
+		// WAF 로그는 제 러너가 필요하다. CLOUDFRONT 범위 web ACL 은 us-east-1
+		// 에만 로그를 내보내므로, 작업 리전 클라이언트로 그 로그 그룹을 조회하면
+		// 없는 그룹이라며 실패한다. 두 리전이 같으면 러너를 공유해 동시 실행
+		// 상한이 같은 크기의 풀 둘이 아니라 하나로 남는다.
+		service.insightsGlobal =
+			clients.wafRegion === clients.region
+				? service.insights
+				: new InsightsRunner(clients.logsGlobal, {
+						concurrency: cfg.limits.insightsConcurrency,
+						timeoutMs: cfg.limits.queryTimeoutSeconds * 1000
+					});
+
+		// 리전을 정하는 것은 자격증명이고 config.json 은 그것을 기록할 뿐이다.
+		// 파일에 낡은 리전을 남겨 두는 것이, 대시보드가 한 리전을 따지면서 다른
+		// 리전을 부르게 만든 원인이었다.
+		if (cfg.region !== clients.region) {
+			logger.info("recording the credentials' region in the config", {
+				was: cfg.region,
+				now: clients.region
+			});
+			cfg = { ...cfg, region: clients.region };
+			try {
+				store.set(cfg);
+			} catch (err) {
+				logger.warn('could not save the region to the config', { error: message(err) });
+			}
+		}
+
+		const identity = await whoAmI(clients.sts, clients.region, AbortSignal.timeout(15_000));
+		identity.wafRegion = clients.wafRegion;
+		service.identity = identity;
+		logger.info('credentials accepted', {
+			account: identity.account,
+			region: identity.region,
+			wafRegion: identity.wafRegion,
+			key: redacted(creds)
+		});
+	} catch (err) {
+		service.credentialError = new Error(`자격증명 확인 실패: ${message(err)}`);
 		logger.warn('AWS is unavailable; the UI will explain what to configure', {
 			error: service.credentialError,
 			envFile: service.envFile
