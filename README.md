@@ -5,13 +5,42 @@ EKS 워크로드를 로컬에서 관찰하는 단일 바이너리 대시보드�
 데이터는 전부 **AWS CloudWatch**에서 옵니다. Kubernetes API에도 Prometheus에도 접근하지 않으며, 액세스 키 하나로 동작합니다. 예외는 하나, 트래픽 점검 화면뿐입니다 — 아래 [트래픽 점검](#트래픽-점검) 참고.
 
 ```bash
-cp .env.example .env    # 액세스 키 입력 — 실행 파일과 같은 폴더에 둡니다
-./skills-dashboard      # http://127.0.0.1:8080
+cp .env.example .env    # 액세스 키 입력 — 저장소 루트에 둡니다
+node start.mjs          # http://127.0.0.1:8080
 ```
 
-바이너리에 웹 UI가 들어 있어 실행이 곧 설치입니다. Windows와 Linux 바이너리를 모두 산출합니다.
+`npm start` 도 같습니다. 인자를 줄 때는 `npm start -- --port 9000` 처럼 `--` 를 끼웁니다.
 
-`.env` 는 **실행 파일과 같은 폴더**를 먼저, 없으면 `~/.skills-dashboard/`(`config.json` 이 있는 곳)를 봅니다. 현재 작업 디렉터리는 보지 않습니다 — 어디서 실행했느냐에 따라 읽는 키가 달라지지 않게 하기 위해서입니다. 파일이 없으면 환경변수를 씁니다. 개발 중에는 `mise` 가 저장소 루트의 `.env` 를 환경변수로 넣어 주므로(`mise.toml` 의 `[env] _.file`) `mise run go:run` 은 그대로 동작합니다. mise 없이 `go run` 만 쓰면 자격증명이 전달되지 않습니다.
+**설치도 빌드도 없습니다.** `node_modules` 가 없어도 되고 `npm install` 을 돌릴 필요도 없습니다. `git clone` 한 다음 위 두 줄이 전부입니다. Go 툴체인이 없는 곳에서도 동작하는 것이 요점입니다 — 실행 파일은 `bin/` 에 플랫폼별로 커밋되어 있고, 웹 UI는 그 안에 들어 있습니다.
+
+`start.mjs` 가 하는 일은 실행 파일을 찾아 띄우는 것뿐입니다. 포트 폴백(8080 이 막히면 8085 까지), 브라우저 자동 실행, 종료 처리는 바이너리가 합니다. 준 인자는 그대로 넘어갑니다.
+
+| 플래그 | 기본값 | 뜻 |
+| --- | --- | --- |
+| `--port` | `8080` | 명시하지 않으면 8080..8085 중 빈 포트를 씁니다. 실제 포트는 로그의 `dashboard is listening` 줄에 있습니다 |
+| `--addr` | `127.0.0.1` | 바인드 주소 |
+| `--open` | `true` | `--open=false` 로 끕니다. `=` 가 필수입니다 |
+| `--verbose` | `false` | debug 로그 |
+| `--env` | — | 다른 `.env` 를 쓸 때. 준 경로가 없으면 실행이 실패합니다 |
+
+### `.env` 를 어디에 두나
+
+바이너리 자체는 **실행 파일과 같은 폴더**를 먼저, 없으면 `~/.skills-dashboard/`(`config.json` 이 있는 곳)를 봅니다. 현재 작업 디렉터리는 보지 않습니다 — 어디서 실행했느냐에 따라 읽는 키가 달라지지 않게 하기 위해서입니다.
+
+그래서 `bin/` 안의 실행 파일을 직접 띄우면 저장소 루트의 `.env` 가 무시됩니다. `start.mjs` 가 `--env <저장소 루트>/.env` 를 대신 넘겨 주므로, **런처로 실행하는 한 `.env` 는 저장소 루트에 두면 됩니다.** 파일이 없으면 무엇을 해야 하는지 알려 주고 그대로 실행합니다 — 자격증명 없이도 대시보드는 뜨고, 설정 화면이 나머지를 설명합니다.
+
+`.env` 는 `.gitignore` 대상이라 clone 에 딸려 오지 않습니다. 액세스 키는 따로 옮기세요.
+
+### 프로세스가 남았을 때
+
+Ctrl+C 로 내리면 깨끗이 끝납니다. 콘솔 창을 강제로 닫는 등으로 런처가 자식을 정리하지 못한 경우에는 포트를 붙든 채 남을 수 있습니다.
+
+```powershell
+Get-Process skills-dashboard* | Stop-Process -Force   # Windows
+pkill -f skills-dashboard                             # Linux
+```
+
+방치하면 다음 실행이 조용히 8081 로 옮겨 가고, 8080 을 열어 본 사람은 옛 빌드를 보게 됩니다.
 
 ---
 
@@ -57,26 +86,56 @@ cp .env.example .env    # 액세스 키 입력 — 실행 파일과 같은 폴�
 
 ## 개발
 
-툴체인은 mise가 관리합니다.
+툴체인은 mise가 관리합니다. 패키지 매니저는 npm 하나입니다.
 
 ```bash
 mise install            # go 1.26.5 + node 24
-mise run web:install
+npm run install:web     # web/node_modules
 mise run test           # go test ./... + vitest
 mise run test:e2e       # playwright 레이아웃 검증
-mise run build          # dist/skills-dashboard{,.exe}
+mise run build          # bin/skills-dashboard-{win32-x64.exe,linux-x64}
 ```
 
-개발 중에는 API와 UI를 따로 띄웁니다.
+개발 중에는 Vite와 API를 함께 띄웁니다.
 
 ```bash
-mise run go:run         # :8080
-mise run web:dev        # :5173, /api 를 :8080 으로 프록시
+npm run dev             # :5173 (UI) + :8080 (API), /api 를 프록시
 ```
+
+따로 띄우고 싶으면 `mise run go:run` 과 `mise run web:dev` 를 각각 씁니다.
+
+### 바이너리를 다시 만들었을 때
+
+`bin/` 의 실행 파일은 커밋합니다. 대회장에는 Go 툴체인이 없어 거기서 만들 수 없기 때문입니다.
+
+git 은 바이너리를 델타 압축하지 못하므로, 다시 커밋할 때마다 히스토리에 12.6MB × 2 가 영구히 쌓입니다. **소스를 고칠 때마다 커밋하지 말고** 마일스톤과 대회 전날에만 갱신하세요. 대신 `bin/BUILD.txt` 에 어느 커밋에서 만들었는지 적혀 있으니, 낡은 바이너리를 돌리고 있는지는 그 파일로 확인합니다.
+
+```bash
+mise run build
+git rev-parse --short HEAD    # BUILD.txt 의 commit 과 대조
+```
+
+### 대회장 환경 재현
+
+가장 값진 검증입니다. PATH 에서 go 와 mise 를 빼고 node 만 남긴 채, 별도 clone 에서 돌립니다.
+
+```powershell
+pwsh -NoProfile
+$env:PATH = "$(Split-Path (mise which node));C:\Windows\System32;C:\Windows"
+git clone <this repo> $env:TEMP\rehearsal
+cd $env:TEMP\rehearsal
+node start.mjs
+```
+
+`node_modules` 가 없는 상태에서 대시보드가 떠야 합니다. `.env` 를 넣었다면 로그의 `reading credentials envFile=...` 이 **clone 루트**를 가리키는지 확인하세요 — `bin\.env` 를 가리키면 `--env` 전달이 동작하지 않은 것입니다.
 
 ### 구조
 
 ```
+start.mjs                 런처 — 실행 파일을 찾아 띄운다. 의존성 없음
+scripts/launcher.mjs      실행 파일 탐색과 .env 전달. start.mjs 와 dev.mjs 가 공유
+scripts/dev.mjs           개발용 — Vite 와 API 를 함께 띄운다
+bin/                      커밋된 실행 파일. 대회장에는 이것만 있으면 된다
 cmd/skills-dashboard/     진입점, http.Server
 internal/domain/          순수 로직 — 윈도, 쿼리 빌더, 응답 계약, 메트릭 카탈로그
 internal/awsx/            AWS 호출 — 인터페이스 경계, SEARCH 기반 메트릭, Insights 러너, 캐시

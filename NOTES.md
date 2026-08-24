@@ -12,6 +12,17 @@
 ## 결정 로그
 <!-- append -->
 
+### 2026-08-24 대회장에는 node 만 있으므로 실행 파일을 커밋해 가져간다
+
+- 맥락: 대회장에 Go 툴체인이 없다. node 는 허용된다. 그리고 그 전에 저장소가 아예 빌드되지 않는 상태였다 — 머지 커밋 `cdcc264` 가 충돌 마커를 7개 파일에 그대로 커밋해 `go build` 도 `vite build` 도 파서에서 죽었다. 부모(`c4a967c`, `886c64a`)는 둘 다 깨끗했으므로 마커를 손으로 읽는 대신 별도 워크트리에서 머지를 3-way 로 재생했다. 두 갈래가 서로 다른 기능(namespace 필터링 / `/api/check`·페이지 병렬화)이라 ours/theirs 택일은 `config.go` 한 곳뿐이었다.
+- 채택: ⓐ 백엔드를 Node 로 포팅하지 않는다. 비테스트 7,400줄과 그것을 지키는 테스트 6,600줄이 이 대시보드의 값어치이고, 다시 쓰면 그 검증이 통째로 사라진다. 대신 `node start.mjs` 가 `bin/` 의 실행 파일을 자식 프로세스로 띄운다. ⓑ 런처의 의존성은 0이다 — 대회장에서 `npm install` 이 필요 없어야 clone 하나로 끝난다. ⓒ 실행 파일을 커밋한다(플랫폼당 12.6MB). `.gitattributes` 의 `bin/** binary` 를 **먼저** 커밋했다: `core.autocrlf` 가 켜진 기계에서 clone 하면 개행 변환이 exe 를 못 쓰게 만들고, 증상은 "올바른 Win32 응용 프로그램이 아닙니다" 라 원인이 보이지 않는다. ⓓ yarn 을 지우고 npm 으로 갔다.
+- 런처가 실제로 더하는 것: `--env`. 바이너리는 자기 옆과 `~/.skills-dashboard` 만 보고 작업 디렉터리를 일부러 보지 않는다. 그래서 `bin/` 안의 exe 를 그냥 띄우면 저장소 루트의 `.env` 가 무시된다 — 리허설 로그가 `tried="[...\bin\.env, ...\.skills-dashboard\.env]"` 로 그걸 그대로 보여 줬다. 없는 경로를 `--env` 로 넘기면 프로세스가 죽으므로(`TestResolveEnvFileRejectsAPathThatIsNotThere`) 파일이 있을 때만 넘긴다.
+- 머지에서 갈린 판단 셋: ⓐ `handlePage` 는 886c64a 의 병렬 `buildPanels` 를 쓰되 cfg 는 `requestConfig` 에서 받는다. 병렬로 바꾸면서 잃은 것이 하나 있었다 — 취소된 요청이 유료 Insights 스캔을 시작하지 않게 막던 검사. 웨이브 앞과 각 goroutine 안에 되살렸다(`TestCanceledPageRequestStopsBeforeBuildingPanels`). ⓑ `levelFilter` 에서 `dashboardMessage as raw` 를 뺐다. `PodErrorList` 가 그 필드를 이름으로 선택하는데 Insights 는 선택과 재별칭을 동시에 하는 쿼리를 거부한다 — `dc2a09d` 가 고친 게 바로 그 거부이고, preamble 어휘로 옮겨도 조건은 같다. ⓒ `PodBadStatusSeries` 는 그룹 키에서 `path` 를 뺀다. 그 근거는 886c64a 가 남긴 주석이 길게 적어 두었고, 그 주석은 충돌 밖이라 HEAD 코드를 그대로 두면 주석과 코드가 서로를 부정한다.
+- 기각: ⓐ 백엔드 전면 Node 포팅 — 진짜 node-only 지만 수일 규모이고 테스트 자산을 버린다. exe 실행이 가능하다는 확인을 받고 접었다. ⓑ git-lfs — 대회장 PC 에 lfs 가 없으면 clone 결과가 130바이트 포인터 텍스트다. 가장 치명적인 실패 모드라 아예 배제했다. ⓒ 저장소 전체 개행 재정규화(100개 파일) — `prettier --check` 와 `gofmt -l` 이 CRLF 때문에 손대지 않은 파일까지 전부 실패하는 건 사실이지만, 이번 작업의 diff 를 덮는 값이 더 크다. `.gitattributes` 는 바이너리 보호로만 좁혔다.
+- 대가: ⓐ 소스를 고치면 `mise run build` 로 바이너리를 다시 만들어 커밋해야 하고, 그때마다 히스토리에 25MB 가 쌓인다. `bin/BUILD.txt` 가 출처를 적지만 강제 장치는 없다 — 규율에 맡겼다. ⓑ Windows 에서 런처를 강제 종료하면(창 닫기, `taskkill /F`) exe 가 고아로 남는다. 순수 node 표준 라이브러리로는 Job Object 를 걸 수 없다. README 에 복구 명령을 적었다.
+- 확인한 것: PATH 에서 go·mise·yarn 을 빼고 별도 clone 에서 `node start.mjs` / `npm start` / `npm start -- --port 9000` 이 전부 뜨는 것, `node_modules` 가 없는 상태에서 되는 것, SPA 폴백(`/logs/pod` 하드 리프레시)이 사는 것, clone 된 exe 가 원본과 바이트 단위로 같은 것, Ctrl+C 후 프로세스가 남지 않는 것.
+- 확인 못 한 것: 실제 AWS 계정에 대한 엔드투엔드. 특히 이번 머지에서 가장 많이 손댄 `pod-status-breakdown`(`PodBadStatusByPath`) 과 `pod-errors`(`levelFilter`) 는 Go 테스트가 쿼리 문자열까지만 본다. 자격증명이 생기면 두 패널을 눈으로 봐야 한다. 그리고 Defender/SmartScreen 이 서명 없는 exe 를 막는지도 아직 겪지 않았다.
+
 ### 2026-08-16 아무도 읽지 않는 그룹 키가 총계를 갉아먹고 있었다
 
 - 맥락: "팟 로그의 404·403도 WAF처럼 각각 자세히 보기가 있어야 한다"에서 출발해 두 가지가 나왔다. ⓐ `pod-status-codes`는 상세 컬럼을 `userAgentField`가 설정된 경우에만 붙였는데(`panels_logs.go`), 그 필드는 기본값이 없다 — 액세스 로그에 User-Agent가 있는지는 애플리케이션이 정하므로 짐작할 이름이 없기 때문이다. 결과적으로 **기본 설치에서는 팟 로그에 펼치기가 하나도 없었다**. ⓑ 코드별 드릴다운이 아예 없었다. 코드별 수치는 차트 시리즈로만 존재했다. 그리고 그걸 만들려고 쿼리를 열었더니 **`PodBadStatusSeries`가 `by bin(t), status, path`로 묶고 있는데 `path`를 읽는 코드가 없었다.** Insights는 stats 결과를 `InsightsMaxRows`(10,000)에서 자르고 그 사실을 결과에 적지 않는다. 행 수는 구간 수 × 코드 수 × 경로 수이므로 2시간·5분이면 경로 83종에서 시계열이 잘린다 — 랜덤 URL을 긁는 스캐너 하나면 넘는다. 즉 쓰지도 않는 그룹 키가 차트와 그 옆의 `비정상 응답` 총계를 조용히 줄이고 있었다. `awsx.QueryResult.Truncated`는 이미 계산되고 있었지만 **아무도 읽지 않았다**.
