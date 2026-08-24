@@ -11,9 +11,26 @@ node start.mjs          # http://127.0.0.1:8080
 
 `npm start` 도 같습니다. 인자를 줄 때는 `npm start -- --port 9000` 처럼 `--` 를 끼웁니다.
 
-**설치도 빌드도 없습니다.** `node_modules` 가 없어도 되고 `npm install` 을 돌릴 필요도 없습니다. `git clone` 한 다음 위 두 줄이 전부입니다. Go 툴체인이 없는 곳에서도 동작하는 것이 요점입니다 — 실행 파일은 `bin/` 에 플랫폼별로 커밋되어 있고, 웹 UI는 그 안에 들어 있습니다.
+**설치도 빌드도 없습니다.** `node_modules` 가 없어도 되고 `npm install` 을 돌릴 필요도 없습니다. `git clone` 한 다음 위 두 줄이 전부입니다. Go 툴체인이 없는 곳에서도 동작하는 것이 요점입니다 — 실행할 것은 저장소에 함께 커밋되어 있고, 웹 UI는 그 안에 들어 있습니다.
 
-`start.mjs` 가 하는 일은 실행 파일을 찾아 띄우는 것뿐입니다. 포트 폴백(8080 이 막히면 8085 까지), 브라우저 자동 실행, 종료 처리는 바이너리가 합니다. 준 인자는 그대로 넘어갑니다.
+### 엔진이 둘입니다
+
+같은 대시보드를 띄우는 방법이 두 가지 있고, `start.mjs` 가 무엇을 띄울지 고릅니다.
+
+| 엔진 | 실체 | 비고 |
+| --- | --- | --- |
+| `node` | `server/dist/skills-dashboard.mjs` | TypeScript 백엔드를 esbuild 로 묶은 파일 하나. 실행 파일이 없으므로 차단당할 대상도 없습니다 |
+| `binary` | `bin/skills-dashboard-<플랫폼>` | Go 백엔드. 6,600줄의 Go 테스트가 지키고 있습니다 |
+
+```bash
+node start.mjs                                  # 번들이 있으면 node, 없으면 binary
+SKILLS_DASHBOARD_ENGINE=binary node start.mjs   # exe 로 고정
+SKILLS_DASHBOARD_ENGINE=node   node start.mjs   # 번들로 고정
+```
+
+**서명 없는 exe 를 Defender 나 SmartScreen 이 막으면 `SKILLS_DASHBOARD_ENGINE=node` 로 넘어가세요.** 두 엔진이 있는 이유가 그것입니다. 로그도 응답도 같으므로 이 문서의 나머지는 어느 쪽에서든 그대로 읽힙니다.
+
+`start.mjs` 가 하는 일은 띄울 것을 찾아 실행하는 것뿐입니다. 포트 폴백(8080 이 막히면 8085 까지), 브라우저 자동 실행, 종료 처리는 엔진이 스스로 합니다. 준 인자는 그대로 넘어갑니다.
 
 | 플래그 | 기본값 | 뜻 |
 | --- | --- | --- |
@@ -91,9 +108,12 @@ pkill -f skills-dashboard                             # Linux
 ```bash
 mise install            # go 1.26.5 + node 24
 npm run install:web     # web/node_modules
+npm run install:server  # server/node_modules (esbuild · aws-sdk · hono)
 mise run test           # go test ./... + vitest
 mise run test:e2e       # playwright 레이아웃 검증
 mise run build          # bin/skills-dashboard-{win32-x64.exe,linux-x64}
+mise run node:build     # server/dist/skills-dashboard.mjs
+mise run parity         # 두 엔진의 응답을 엔드포인트마다 대조
 ```
 
 개발 중에는 Vite와 API를 함께 띄웁니다.
@@ -104,16 +124,31 @@ npm run dev             # :5173 (UI) + :8080 (API), /api 를 프록시
 
 따로 띄우고 싶으면 `mise run go:run` 과 `mise run web:dev` 를 각각 씁니다.
 
-### 바이너리를 다시 만들었을 때
+### 두 엔진이 같은 답을 내는지
+
+`mise run parity` 가 두 엔진을 각각 띄우고 같은 요청을 던져 응답을 비교합니다. 이식이 옳은지 확인할 수단이 이것뿐입니다 — 한쪽만 고치면 여기서 걸립니다.
+
+```
+일치 35 · 미구현 0 · 불일치 0
+```
+
+시각처럼 호출마다 달라지는 값과, 실행 파일 옆의 `.env` 를 찾는 경로는 비교에서 뺍니다. 뒤의 것은 엔진마다 다른 자리에 있는 것이 맞습니다.
+
+자격증명이 없으면 AWS 를 쓰는 엔드포인트는 양쪽 다 503 을 냅니다. 그 상태의 일치는 "둘이 똑같이 거절한다" 까지만 말합니다. **실제 계정에 대한 대조는 아직 하지 않았습니다.**
+
+### 바이너리와 번들을 다시 만들었을 때
 
 `bin/` 의 실행 파일은 커밋합니다. 대회장에는 Go 툴체인이 없어 거기서 만들 수 없기 때문입니다.
 
 git 은 바이너리를 델타 압축하지 못하므로, 다시 커밋할 때마다 히스토리에 12.6MB × 2 가 영구히 쌓입니다. **소스를 고칠 때마다 커밋하지 말고** 마일스톤과 대회 전날에만 갱신하세요. 대신 `bin/BUILD.txt` 에 어느 커밋에서 만들었는지 적혀 있으니, 낡은 바이너리를 돌리고 있는지는 그 파일로 확인합니다.
 
 ```bash
-mise run build
+mise run build          # bin/  — Go 툴체인 필요
+mise run node:build     # server/dist/  — node 만 있으면 됩니다
 git rev-parse --short HEAD    # BUILD.txt 의 commit 과 대조
 ```
+
+번들도 같은 이유로 커밋합니다(약 3.7MB). 텍스트라 델타가 조금은 먹지만, 규율은 같습니다 — 마일스톤에만 갱신하고 출처는 `server/dist/BUILD.txt` 가 적습니다.
 
 ### 대회장 환경 재현
 
@@ -127,25 +162,40 @@ cd $env:TEMP\rehearsal
 node start.mjs
 ```
 
-`node_modules` 가 없는 상태에서 대시보드가 떠야 합니다. `.env` 를 넣었다면 로그의 `reading credentials envFile=...` 이 **clone 루트**를 가리키는지 확인하세요 — `bin\.env` 를 가리키면 `--env` 전달이 동작하지 않은 것입니다.
+`node_modules` 가 없는 상태에서 대시보드가 떠야 합니다. **엔진을 바꿔 두 번 하세요** — `SKILLS_DASHBOARD_ENGINE=node` 와 `=binary` 각각으로 뜨는지 봐야, 현장에서 한쪽이 막혔을 때 다른 쪽으로 넘어갈 수 있다는 것이 확인됩니다. `.env` 를 넣었다면 로그의 `reading credentials envFile=...` 이 **clone 루트**를 가리키는지 확인하세요 — `bin\.env` 를 가리키면 `--env` 전달이 동작하지 않은 것입니다.
 
 ### 구조
 
 ```
-start.mjs                 런처 — 실행 파일을 찾아 띄운다. 의존성 없음
-scripts/launcher.mjs      실행 파일 탐색과 .env 전달. start.mjs 와 dev.mjs 가 공유
+start.mjs                 런처 — 엔진을 고르고 띄운다. 의존성 없음
+scripts/launcher.mjs      엔진 선택과 .env 전달. start.mjs 와 dev.mjs 가 공유
 scripts/dev.mjs           개발용 — Vite 와 API 를 함께 띄운다
-bin/                      커밋된 실행 파일. 대회장에는 이것만 있으면 된다
+scripts/parity.mjs        두 엔진의 응답 대조
+bin/                      커밋된 Go 실행 파일
+
 cmd/skills-dashboard/     진입점, http.Server
 internal/domain/          순수 로직 — 윈도, 쿼리 빌더, 응답 계약, 메트릭 카탈로그
 internal/awsx/            AWS 호출 — 인터페이스 경계, SEARCH 기반 메트릭, Insights 러너, 캐시
 internal/config/          .env 자격증명, 리소스 선택 저장
 internal/api/             HTTP 핸들러와 패널 빌더
 internal/web/             embed.FS + SPA 폴백
+
+server/dist/              커밋된 node 번들
+server/src/domain/        internal/domain 의 이식
+server/src/aws/           internal/awsx 의 이식
+server/src/config/        internal/config 의 이식
+server/src/http/          internal/api 의 이식
+server/src/web/           SPA 를 번들에 인라인 (embed.go 대응)
+server/src/contract.ts    web/src/lib/types.ts 를 서버 타입으로 재사용
+
 web/                      SvelteKit (SSR 없음), uPlot + layerchart
 ```
 
 `internal/awsx/iface.go`의 좁은 인터페이스가 테스트 경계입니다. 모든 AWS 호출은 여기를 지나므로 실제 AWS 없이 전 경로를 검증할 수 있습니다.
+
+node 쪽에는 그에 해당하는 테스트가 아직 없습니다. 대신 `web/src/lib/types.ts` 를 그대로 구현 타입으로 쓰므로 와이어 계약 위반은 컴파일에서 걸리고, 나머지는 `mise run parity` 가 봅니다.
+
+SPA 는 한 번만 빌드해 두 엔진이 나눠 씁니다. `mise run web:build` 가 `internal/web/dist` 에 쓰고, Go 는 그것을 `//go:embed` 로, node 는 번들 시점에 base64 로 인라인합니다.
 
 ---
 
