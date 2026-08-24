@@ -6,43 +6,30 @@
 // 운영자는 이유를 볼 기회조차 얻지 못한다.
 
 import type { Cache } from './aws/cache.ts';
-import type { Clients } from './aws/client.ts';
-import type { InsightsRunner } from './aws/insights.ts';
-import type { MetricFetcher } from './aws/metrics.ts';
+import type { AWSConn, CredentialSource } from './connect.ts';
+import { connectionOk, noConnection } from './connect.ts';
+import { CredentialStore } from './config/credstore.ts';
 import type { Credentials } from './config/env.ts';
 import type { ConfigStore } from './config/store.ts';
-import type { Identity } from './contract.ts';
 
 export interface Service {
 	store: ConfigStore;
 
-	/** AWS 클라이언트 묶음. 자격증명이 통하지 않았으면 null 이다. */
-	clients: Clients | null;
-
 	/** 짧은 창의 메모이제이션과 single-flight. */
 	cache: Cache;
 
-	/** 메트릭을 읽는 쪽. 클라이언트가 없으면 null 이다. */
-	metrics: MetricFetcher | null;
-
-	/** Insights 러너. 작업 리전용이다. */
-	insights: InsightsRunner | null;
+	/** 설정 화면에서 저장한 키. 저장된 것이 없으면 get() 이 null 을 낸다. */
+	credentials: CredentialStore;
 
 	/**
-	 * WAF 리전을 조회하는 러너.
+	 * 지금 힘을 쓰는 AWS 연결.
 	 *
-	 * CLOUDFRONT 범위 web ACL 은 로그를 us-east-1 에만 내보내므로, 작업 리전에
-	 * 묶인 러너는 그 로그 그룹을 아예 볼 수 없다 — StartQuery 가 없는 그룹이라며
-	 * 실패한다. 두 리전이 같으면 위와 같은 러너이고, 그래서 동시 실행 예산이
-	 * 두 개가 아니라 하나의 풀로 남는다.
+	 * 통째로 교체된다 — 설정 화면이 키를 저장하면 여기가 새 객체로 바뀐다.
+	 * 그래서 핸들러는 요청마다 한 번 집어서 그 사본을 끝까지 쓴다. await 사이에
+	 * 교체가 끼어들어 한 페이지의 두 패널이 서로 다른 계정을 설명하는 일이
+	 * 없어야 하기 때문이다.
 	 */
-	insightsGlobal: InsightsRunner | null;
-
-	/** AWS 에 닿지 못하는 이유. null 이면 정상이다. */
-	credentialError: Error | null;
-
-	/** 자격증명이 통했을 때의 신원. 아직 확인 전이면 null 이다. */
-	identity: Identity | null;
+	aws: AWSConn;
 
 	/**
 	 * 자격증명을 읽은 .env 경로. 찾지 못했으면 빈 문자열이다.
@@ -55,12 +42,6 @@ export interface Service {
 	/** 저장된 설정을 읽으면서 고쳐야 했던 것. 빈 패널의 이유가 되므로 남긴다. */
 	configNotices: string[];
 
-	/**
-	 * 검증 전의 자격증명. 시작 절차가 .env 를 읽는 단계와 AWS 에 붙는 단계로
-	 * 나뉘어 있어 그 사이를 건너는 값이다.
-	 */
-	pendingCredentials?: Credentials | undefined;
-
 	/** 창을 고정할 수 있게 열어 둔다. 테스트가 쓴다. */
 	now: () => Date;
 
@@ -69,18 +50,20 @@ export interface Service {
 	 * 캐시된 답은 다른 것을 설명하고 있기 때문이다.
 	 */
 	invalidateCache: () => void;
+
+	/**
+	 * 키를 연결로 바꾸는 방법. 테스트만 바꿔 끼우고, 실제 실행은 connect 를
+	 * 그대로 쓴다.
+	 */
+	connector?: (creds: Credentials, source: CredentialSource) => Promise<AWSConn>;
 }
 
-export function newService(store: ConfigStore, cache: Cache): Service {
+export function newService(store: ConfigStore, cache: Cache, credentials: CredentialStore): Service {
 	return {
 		store,
-		clients: null,
 		cache,
-		metrics: null,
-		insights: null,
-		insightsGlobal: null,
-		credentialError: null,
-		identity: null,
+		credentials,
+		aws: noConnection('none', new Error('AWS clients are not configured')),
 		envFile: '',
 		configNotices: store.notices(),
 		now: () => new Date(),
@@ -93,15 +76,16 @@ export function newService(store: ConfigStore, cache: Cache): Service {
  *
  * 설정 화면은 detail 보다 hint 를 먼저 보여 준다. 그래서 경로는 hint 를 타고
  * 가야 하고, detail 에만 넣으면 화면에 영영 뜨지 않는다.
+ *
+ * 이제 화면 자체가 키를 저장할 수 있으므로 그것부터 말한다. .env 경로도 함께
+ * 실어 보낸다 — 거기에 키를 둔 운영자가 왜 안 먹혔는지 가장 먼저 찾을 사람이다.
  */
 export function credentialHint(service: Service): string {
+	const fix = '설정 화면에서 AWS 액세스 키를 입력해 저장하세요.';
 	if (service.envFile === '') {
-		return (
-			'AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION 을 담은 .env 를 ' +
-			'실행 파일과 같은 폴더나 ~/.skills-dashboard 에 두고 다시 실행하세요.'
-		);
+		return `${fix} .env 로 주려면 실행 파일과 같은 폴더나 ~/.skills-dashboard 에 두고 다시 실행하세요.`;
 	}
-	return `${service.envFile} 에 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION 을 설정한 뒤 다시 실행하세요.`;
+	return `${fix} 또는 ${service.envFile} 에 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION 을 설정하세요.`;
 }
 
 /**
@@ -115,23 +99,32 @@ export function credentialHint(service: Service): string {
  * 남는 답은 설정뿐이다.
  */
 export function serviceRegion(service: Service): string {
-	return service.clients !== null ? service.clients.region : service.store.get().region;
+	const clients = service.aws.clients;
+	return clients !== null ? clients.region : service.store.get().region;
 }
 
 export function serviceWAFRegion(service: Service): string {
-	return service.clients !== null ? service.clients.wafRegion : service.store.get().wafRegion;
+	const clients = service.aws.clients;
+	return clients !== null ? clients.wafRegion : service.store.get().wafRegion;
 }
 
 /**
- * requireAWS 는 쓸 수 있는 자격증명이 있는지 본다. 없으면 그 이유를 담은 응답을
- * 돌려주고, 있으면 null 을 돌려준다.
+ * requireAWS 는 핸들러가 쓸 연결을 돌려주거나, 왜 없는지를 돌려준다. 스냅샷은
+ * 요청마다 한 번만 잡는다 — 중간에 떨어진 저장이, 이미 조립 중인 페이지의 발밑을
+ * 옮기면 안 된다.
  */
-export function requireAWS(service: Service): { error: Error; hint: string } | null {
-	if (service.credentialError !== null) {
-		return { error: service.credentialError, hint: credentialHint(service) };
+export function requireAWS(
+	service: Service
+): { conn: AWSConn; denied: null } | { conn: null; denied: { error: Error; hint: string } } {
+	const conn = service.aws;
+	if (!connectionOk(conn)) {
+		return {
+			conn: null,
+			denied: {
+				error: conn.error ?? new Error('AWS clients are not configured'),
+				hint: credentialHint(service)
+			}
+		};
 	}
-	if (service.clients === null) {
-		return { error: new Error('AWS clients are not configured'), hint: credentialHint(service) };
-	}
-	return null;
+	return { conn, denied: null };
 }

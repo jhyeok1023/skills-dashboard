@@ -125,7 +125,8 @@ type discoveryResult struct {
 }
 
 func (s *Service) handleDiscovery(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAWS(w) {
+	conn, ok := s.requireAWS(w)
+	if !ok {
 		return
 	}
 	kind := r.PathValue("kind")
@@ -139,7 +140,7 @@ func (s *Service) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), discoveryTimeout)
 	defer cancel()
 
-	res, err := s.discover(ctx, kind, prefix)
+	res, err := s.discover(ctx, conn, kind, prefix)
 	if err != nil {
 		if err == errUnknownKind {
 			badRequest(w, fmt.Errorf("unknown discovery kind %q", kind))
@@ -218,39 +219,41 @@ func listing(l awsx.Listing, err error) (discoveryResult, error) {
 	return discoveryResult{Listing: l}, err
 }
 
-func (s *Service) discover(ctx context.Context, kind, prefix string) (discoveryResult, error) {
+func (s *Service) discover(ctx context.Context, conn *AWSConn, kind, prefix string) (discoveryResult, error) {
 	var load func(context.Context) (discoveryResult, error)
 
 	switch kind {
 	case "targetgroups":
 		load = func(ctx context.Context) (discoveryResult, error) {
-			return listing(awsx.TargetGroups(ctx, s.Clients.ELB))
+			return listing(awsx.TargetGroups(ctx, conn.Clients.ELB))
 		}
 	case "loadbalancers":
 		load = func(ctx context.Context) (discoveryResult, error) {
-			return listing(awsx.LoadBalancers(ctx, s.Clients.ELB))
+			return listing(awsx.LoadBalancers(ctx, conn.Clients.ELB))
 		}
 	case "loggroups":
 		load = func(ctx context.Context) (discoveryResult, error) {
-			return listing(awsx.LogGroups(ctx, s.Clients.Logs, prefix))
+			return listing(awsx.LogGroups(ctx, conn.Clients.Logs, prefix))
 		}
 	case "waf-loggroups":
 		// WAF log groups are listed from the WAF region. A CLOUDFRONT-scoped
 		// web ACL writes only into us-east-1, so listing the working region
 		// returns nothing and reads as "this account has no WAF logging".
 		load = func(ctx context.Context) (discoveryResult, error) {
-			return listing(awsx.LogGroups(ctx, s.Clients.LogsGlobal, prefix))
+			return listing(awsx.LogGroups(ctx, conn.Clients.LogsGlobal, prefix))
 		}
 	case "rdsproxies":
 		load = func(ctx context.Context) (discoveryResult, error) {
-			return listing(awsx.RDSProxies(ctx, s.Clients.RDS))
+			return listing(awsx.RDSProxies(ctx, conn.Clients.RDS))
 		}
 	case "clusters":
 		load = func(ctx context.Context) (discoveryResult, error) {
-			return listing(awsx.Clusters(ctx, s.Clients.EKS))
+			return listing(awsx.Clusters(ctx, conn.Clients.EKS))
 		}
 	case "webacls":
-		load = s.webACLs
+		load = func(ctx context.Context) (discoveryResult, error) {
+			return s.webACLs(ctx, conn)
+		}
 	default:
 		return discoveryResult{}, errUnknownKind
 	}
@@ -265,14 +268,14 @@ func (s *Service) discover(ctx context.Context, kind, prefix string) (discoveryR
 
 // webACLs lists both scopes: a regional ACL fronting an ALB and a CLOUDFRONT
 // one are equally likely, and the CLOUDFRONT list only exists in us-east-1.
-func (s *Service) webACLs(ctx context.Context) (discoveryResult, error) {
-	regional, err := awsx.WebACLs(ctx, s.Clients.WAF, waftypes.ScopeRegional)
+func (s *Service) webACLs(ctx context.Context, conn *AWSConn) (discoveryResult, error) {
+	regional, err := awsx.WebACLs(ctx, conn.Clients.WAF, waftypes.ScopeRegional)
 	if err != nil {
 		return discoveryResult{}, err
 	}
 	out := discoveryResult{Listing: regional}
 
-	global, err := awsx.WebACLs(ctx, s.Clients.WAFGlobal, waftypes.ScopeCloudfront)
+	global, err := awsx.WebACLs(ctx, conn.Clients.WAFGlobal, waftypes.ScopeCloudfront)
 	if err != nil {
 		// A missing CLOUDFRONT permission must not hide the regional ACLs the
 		// operator can actually use — but it is reported rather than swallowed,

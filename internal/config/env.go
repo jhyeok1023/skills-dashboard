@@ -11,16 +11,21 @@ import (
 	"strings"
 )
 
-// Credentials is an AWS access key as supplied through the .env file.
+// Credentials is an AWS access key, from the .env file or from the settings
+// page.
 //
-// The key is read from disk into memory and never written back out. The
-// dashboard has no login screen that persists anything: rotating the key means
-// editing .env, which is already in .gitignore.
+// It used to be read-only: .env was the one source and nothing ever wrote a key
+// back out. The settings page can now save one, so the same struct is also what
+// CredentialStore persists — see credstore.go for where it lands and what that
+// costs.
+//
+// The json tags are that file's format. They are lowerCamel to match the
+// config file beside it, which the frontend reads directly.
 type Credentials struct {
-	AccessKeyID     string
-	SecretAccessKey string
-	SessionToken    string
-	Region          string
+	AccessKeyID     string `json:"accessKeyId"`
+	SecretAccessKey string `json:"secretAccessKey"`
+	SessionToken    string `json:"sessionToken,omitempty"`
+	Region          string `json:"region"`
 }
 
 // Redacted renders the credentials for display and logging. The secret is never
@@ -49,7 +54,8 @@ func (c Credentials) Validate() error {
 		missing = append(missing, "AWS_REGION")
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("missing %s; add them to your .env file", strings.Join(missing, ", "))
+		return fmt.Errorf("missing %s; set them on the settings page or in your .env file",
+			strings.Join(missing, ", "))
 	}
 	return nil
 }

@@ -130,6 +130,31 @@ export interface Identity {
 	wafRegion?: string;
 }
 
+/** Where the key in force came from. A saved key wins over .env. */
+export type CredentialSource = 'saved' | 'env' | 'none';
+
+/**
+ * The AWS access key, as the settings page edits it.
+ *
+ * The secret is carried in full rather than masked, which is what makes the
+ * form editable instead of retype-only. It is a local tool talking to itself,
+ * so the exposure that adds is the screen it is on.
+ */
+export interface Credentials {
+	accessKeyId: string;
+	secretAccessKey: string;
+	sessionToken?: string;
+	region: string;
+}
+
+export interface CredentialsState extends Credentials {
+	source: CredentialSource;
+	/** Where the .env was found, absent when there was none. */
+	envFile?: string;
+	/** Whether there is a saved key to clear. */
+	saved: boolean;
+}
+
 export interface LogFormat {
 	preset: 'auto' | 'gin' | 'json';
 	timeField: string;

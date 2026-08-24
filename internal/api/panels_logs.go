@@ -62,8 +62,8 @@ type logSource struct {
 
 func (s *Service) podLogs(rc requestCtx) logSource {
 	return logSource{
-		runner:  s.Insights,
-		region:  s.region(),
+		runner:  rc.aws.Insights,
+		region:  rc.aws.Clients.Region,
 		group:   rc.cfg.PodLogGroupOrDefault(),
 		missing: "팟 로그 그룹이 설정되지 않았습니다. 설정에서 클러스터 또는 로그 그룹을 지정하세요.",
 	}
@@ -73,11 +73,11 @@ func (s *Service) podLogs(rc requestCtx) logSource {
 // primary runner when no global one was wired up, which is the shape a test
 // that assembles a Service by hand tends to leave behind.
 func (s *Service) wafLogs(rc requestCtx) logSource {
-	runner := s.InsightsGlobal
+	runner := rc.aws.InsightsGlobal
 	if runner == nil {
-		runner = s.Insights
+		runner = rc.aws.Insights
 	}
-	region := s.wafRegion()
+	region := rc.aws.Clients.WAFRegion
 	return logSource{
 		runner: runner,
 		region: region,

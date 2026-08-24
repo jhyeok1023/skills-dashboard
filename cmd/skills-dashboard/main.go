@@ -86,19 +86,24 @@ func run() error {
 		logger.Warn("config was repaired on load", "detail", note, "file", cfgPath)
 	}
 
+	credPath, err := config.CredentialsPath()
+	if err != nil {
+		return fmt.Errorf("locate config directory: %w", err)
+	}
+	creds := config.LoadCredentialStore(credPath)
+	if note := creds.Notice(); note != "" {
+		logger.Warn("saved credentials were ignored", "detail", note, "file", credPath)
+	}
+
 	svc := &api.Service{
 		Store:         store,
 		Logger:        logger,
+		Credentials:   creds,
 		ConfigNotices: store.Notices(),
 		Cache: &awsx.Cache{
 			TTL:      time.Duration(cfg.Limits.CacheTTLSeconds) * time.Second,
 			ErrorTTL: 5 * time.Second,
 		},
-		Insights: &awsx.InsightsRunner{
-			Concurrency: cfg.Limits.InsightsConcurrency,
-			Timeout:     time.Duration(cfg.Limits.QueryTimeoutSeconds) * time.Second,
-		},
-		Metrics: &awsx.MetricFetcher{},
 	}
 
 	// A path given on the command line has to exist. Anything else is the
@@ -109,76 +114,26 @@ func run() error {
 		return fmt.Errorf("read the .env at %s: %w", *envFile, err)
 	}
 	if envPath != "" {
-		logger.Info("reading credentials", "envFile", envPath)
+		logger.Info("found a .env", "envFile", envPath)
 	} else {
 		logger.Warn("no .env found; falling back to the process environment", "tried", tried)
 	}
 	svc.EnvFile = envPath
 
-	// Credentials are read once at start. A failure is carried rather than
-	// fatal: the UI still comes up and the settings page explains what to fix,
-	// which beats a process that exits before the operator can see why.
-	creds, err := config.LoadCredentials(envPath)
-	if err != nil {
-		svc.CredentialError = err
-	} else if err := creds.Validate(); err != nil {
+	// Connecting is attempted once at start and again whenever the settings
+	// page saves a key. A failure is carried rather than fatal: the UI still
+	// comes up and the settings page explains what to fix, which beats a
+	// process that exits before the operator can see why.
+	conn := svc.Resolve(context.Background())
+	if conn.Err != nil && conn.Source != api.SourceSaved && envPath == "" {
 		// With no file anywhere, the missing keys are only half the story: the
 		// other half is where one was expected to be.
-		if envPath == "" {
-			err = fmt.Errorf("%w (.env 를 다음에서 찾지 못했습니다: %s)", err, strings.Join(tried, ", "))
-		}
-		svc.CredentialError = err
-	} else {
-		clients, err := awsx.New(context.Background(), creds, cfg.WAFRegion)
-		if err != nil {
-			svc.CredentialError = err
-		} else {
-			svc.Clients = clients
-			svc.Insights.API = clients.Logs
-
-			// WAF logs need their own runner. A CLOUDFRONT-scoped web ACL
-			// publishes only into us-east-1, so querying its log group through
-			// the working-region client fails on a group that is not there.
-			// When the regions coincide the runner is shared, which keeps the
-			// concurrency limit a single pool rather than two of the same size.
-			if clients.WAFRegion == clients.Region {
-				svc.InsightsGlobal = svc.Insights
-			} else {
-				svc.InsightsGlobal = &awsx.InsightsRunner{
-					Concurrency: cfg.Limits.InsightsConcurrency,
-					Timeout:     time.Duration(cfg.Limits.QueryTimeoutSeconds) * time.Second,
-					API:         clients.LogsGlobal,
-				}
-			}
-
-			// The credentials decide the region; config.json only records it.
-			// Leaving a stale region in the file is what let the dashboard
-			// reason about one region while calling another.
-			if cfg.Region != clients.Region {
-				logger.Info("recording the credentials' region in the config",
-					"was", cfg.Region, "now", clients.Region)
-				cfg.Region = clients.Region
-				if err := store.Set(cfg); err != nil {
-					logger.Warn("could not save the region to the config", "error", err)
-				}
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			identity, err := awsx.WhoAmI(ctx, clients.STS, clients.Region)
-			cancel()
-			if err != nil {
-				svc.CredentialError = fmt.Errorf("자격증명 확인 실패: %w", err)
-			} else {
-				identity.WAFRegion = clients.WAFRegion
-				svc.Identity = identity
-				logger.Info("credentials accepted", "account", identity.Account, "region", identity.Region,
-					"wafRegion", identity.WAFRegion, "key", creds.Redacted())
-			}
-		}
+		conn.Err = fmt.Errorf("%w (.env 를 다음에서 찾지 못했습니다: %s)", conn.Err, strings.Join(tried, ", "))
 	}
-	if svc.CredentialError != nil {
+	svc.SetAWS(conn)
+	if conn.Err != nil {
 		logger.Warn("AWS is unavailable; the UI will explain what to configure",
-			"error", svc.CredentialError, "envFile", envPath)
+			"error", conn.Err, "source", conn.Source, "envFile", envPath)
 	}
 
 	mux := http.NewServeMux()

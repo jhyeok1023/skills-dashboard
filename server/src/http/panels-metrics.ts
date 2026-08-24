@@ -26,6 +26,7 @@ import {
 import { friendlyTargetGroupName } from '../domain/dimensions.ts';
 import { dashSolid, Panel, Series, variantDash } from '../domain/series.ts';
 import { buckets, periodSeconds, type Window } from '../domain/window.ts';
+import type { AWSConn } from '../connect.ts';
 import type { Service } from '../service.ts';
 
 /**
@@ -36,6 +37,12 @@ export interface RequestCtx {
 	signal: AbortSignal;
 	w: Window;
 	cfg: Config;
+	/**
+	 * 이 요청이 쓰는 AWS 연결. 창과 같은 이유로 여기 실려 내려온다 — 설정
+	 * 화면에서 저장한 키가 한 페이지의 두 패널 사이에 끼어들어 둘이 서로 다른
+	 * 계정을 설명하게 두지 않는다.
+	 */
+	aws: AWSConn;
 }
 
 export type PanelBuilder = (rc: RequestCtx) => Promise<Panel>;
@@ -250,7 +257,7 @@ export async function buildTargetGroupPanel(service: Service, rc: RequestCtx): P
 		return panel;
 	}
 
-	const clients = service.clients as Clients;
+	const clients = rc.aws.clients as Clients;
 	const specs = targetGroupMetrics();
 	const results = await fetchMetrics(
 		service,
@@ -365,7 +372,7 @@ async function buildResourcePanel(
 		return panel;
 	}
 
-	const clients = service.clients as Clients;
+	const clients = rc.aws.clients as Clients;
 	const sets: FilterSet[] = [{ id: 'cluster', label: rc.cfg.clusterName, filters }];
 	const results = await fetchMetrics(service, rc, clients.cw, id, metricRequests(specs, sets));
 
@@ -470,7 +477,7 @@ export function nodeResourcePanel(
 async function nodeScaling(service: Service, rc: RequestCtx): Promise<NodeScaling> {
 	const key = `nodescaling|${rc.cfg.clusterName}`;
 	return service.cache.do(key, rc.signal, () =>
-		clusterNodeScaling(service.clients?.eks ?? null, rc.cfg.clusterName, rc.signal)
+		clusterNodeScaling(rc.aws.clients?.eks ?? null, rc.cfg.clusterName, rc.signal)
 	);
 }
 
@@ -481,7 +488,7 @@ export async function buildCountsPanel(service: Service, rc: RequestCtx): Promis
 		return panel;
 	}
 
-	const clients = service.clients as Clients;
+	const clients = rc.aws.clients as Clients;
 	const specs = countMetrics();
 	const sets: FilterSet[] = [
 		{ id: 'cluster', label: rc.cfg.clusterName, filters: { ClusterName: rc.cfg.clusterName } }
@@ -578,7 +585,7 @@ export async function buildPodStatusPanel(service: Service, rc: RequestCtx): Pro
 		return panel;
 	}
 
-	const clients = service.clients as Clients;
+	const clients = rc.aws.clients as Clients;
 	const specs = podStatusMetrics();
 	const filters: Record<string, string> = { ClusterName: rc.cfg.clusterName };
 	if (rc.cfg.namespace !== '') filters['Namespace'] = rc.cfg.namespace;
@@ -638,7 +645,7 @@ export async function buildRDSProxyPanel(service: Service, rc: RequestCtx): Prom
 		return panel;
 	}
 
-	const clients = service.clients as Clients;
+	const clients = rc.aws.clients as Clients;
 	const specs = rdsProxyMetrics();
 	const sets: FilterSet[] = rc.cfg.rdsProxies.map((p) => ({
 		id: p,
@@ -714,7 +721,7 @@ export async function buildWAFMetricsPanel(service: Service, rc: RequestCtx): Pr
 		return panel;
 	}
 
-	const clients = service.clients as Clients;
+	const clients = rc.aws.clients as Clients;
 	const specs = wafMetrics();
 	const sets: FilterSet[] = rc.cfg.webAcls.map((acl) => ({
 		id: acl,

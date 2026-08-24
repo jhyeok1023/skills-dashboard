@@ -14,10 +14,15 @@ import (
 // requestCtx is the per-request state every panel builder reads. The window is
 // resolved once at the edge and passed down, so no builder can anchor itself to
 // a different clock.
+//
+// The AWS connection is carried the same way and for the same reason: one
+// snapshot per request, so a key saved on the settings page cannot land between
+// two panels of the same page and leave them describing different accounts.
 type requestCtx struct {
 	ctx context.Context
 	w   domain.Window
 	cfg config.Config
+	aws *AWSConn
 }
 
 // fetchMetrics runs a metric fetch behind the cache.
@@ -28,8 +33,8 @@ func (s *Service) fetchMetrics(rc requestCtx, api awsx.MetricsAPI, name string, 
 	key := metricCacheKey(name, rc.w, reqs)
 	return awsx.Cached(rc.ctx, s.Cache, key, func(ctx context.Context) (map[string][]awsx.MetricSeries, error) {
 		f := &awsx.MetricFetcher{API: api}
-		if s.Metrics != nil {
-			f = &awsx.MetricFetcher{API: api, MaxQueries: s.Metrics.MaxQueries}
+		if rc.aws != nil && rc.aws.Metrics != nil {
+			f = &awsx.MetricFetcher{API: api, MaxQueries: rc.aws.Metrics.MaxQueries}
 		}
 		return f.Fetch(ctx, rc.w, reqs)
 	})
@@ -218,7 +223,7 @@ func (s *Service) buildTargetGroupPanel(rc requestCtx) (*domain.Panel, error) {
 	}
 
 	specs := domain.TargetGroupMetrics()
-	results, err := s.fetchMetrics(rc, s.Clients.CW, "targetgroup", metricRequests(specs, sets))
+	results, err := s.fetchMetrics(rc, rc.aws.Clients.CW, "targetgroup", metricRequests(specs, sets))
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +342,7 @@ func (s *Service) buildResourcePanel(rc requestCtx, id, title string, specs []do
 	}
 
 	sets := []filterSet{{id: "cluster", label: rc.cfg.ClusterName, filters: filters}}
-	results, err := s.fetchMetrics(rc, s.Clients.CW, id, metricRequests(specs, sets))
+	results, err := s.fetchMetrics(rc, rc.aws.Clients.CW, id, metricRequests(specs, sets))
 	if err != nil {
 		return nil, err
 	}
@@ -454,7 +459,7 @@ func (s *Service) buildCountsPanel(rc requestCtx) (*domain.Panel, error) {
 	sets := []filterSet{{id: "cluster", label: rc.cfg.ClusterName, filters: map[string]string{
 		"ClusterName": rc.cfg.ClusterName,
 	}}}
-	results, err := s.fetchMetrics(rc, s.Clients.CW, "counts", metricRequests(specs, sets))
+	results, err := s.fetchMetrics(rc, rc.aws.Clients.CW, "counts", metricRequests(specs, sets))
 	if err != nil {
 		return nil, err
 	}
@@ -522,7 +527,7 @@ func (s *Service) buildCountsPanel(rc requestCtx) (*domain.Panel, error) {
 func (s *Service) nodeScaling(rc requestCtx) (awsx.NodeScaling, error) {
 	key := "nodescaling|" + rc.cfg.ClusterName
 	return awsx.Cached(rc.ctx, s.Cache, key, func(ctx context.Context) (awsx.NodeScaling, error) {
-		return awsx.ClusterNodeScaling(ctx, s.Clients.EKS, rc.cfg.ClusterName)
+		return awsx.ClusterNodeScaling(ctx, rc.aws.Clients.EKS, rc.cfg.ClusterName)
 	})
 }
 
@@ -540,7 +545,7 @@ func (s *Service) buildPodStatusPanel(rc requestCtx) (*domain.Panel, error) {
 	}
 	sets := []filterSet{{id: "cluster", label: rc.cfg.ClusterName, filters: filters}}
 
-	results, err := s.fetchMetrics(rc, s.Clients.CW, "pod-status", metricRequests(specs, sets))
+	results, err := s.fetchMetrics(rc, rc.aws.Clients.CW, "pod-status", metricRequests(specs, sets))
 	if err != nil {
 		return nil, err
 	}
@@ -596,7 +601,7 @@ func (s *Service) buildRDSProxyPanel(rc requestCtx) (*domain.Panel, error) {
 		sets = append(sets, filterSet{id: p, label: p, filters: map[string]string{"ProxyName": p}})
 	}
 
-	results, err := s.fetchMetrics(rc, s.Clients.CW, "rds-proxy", metricRequests(specs, sets))
+	results, err := s.fetchMetrics(rc, rc.aws.Clients.CW, "rds-proxy", metricRequests(specs, sets))
 	if err != nil {
 		return nil, err
 	}
@@ -648,9 +653,9 @@ func (s *Service) buildWAFMetricsPanel(rc requestCtx) (*domain.Panel, error) {
 	// distribution serves from. The comparison is between the regions the
 	// clients were actually built for, not the two the config records: the
 	// config's region is a note about the credentials, not what sets them.
-	api := s.Clients.CW
+	api := rc.aws.Clients.CW
 	if s.wafRegion() != s.region() {
-		api = s.Clients.CWGlobal
+		api = rc.aws.Clients.CWGlobal
 	}
 
 	results, err := s.fetchMetrics(rc, api, "waf-metrics", metricRequests(specs, sets))

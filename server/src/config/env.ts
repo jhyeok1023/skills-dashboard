@@ -7,11 +7,12 @@ import { fileURLToPath } from 'node:url';
 import { configDir } from './store.ts';
 
 /**
- * Credentials 는 .env 로 들어온 AWS 액세스 키다.
+ * Credentials 는 .env 나 설정 화면에서 들어온 AWS 액세스 키다.
  *
- * 키는 디스크에서 메모리로만 읽고 되쓰지 않는다. 이 대시보드에는 무언가를
- * 저장하는 로그인 화면이 없다 — 키를 바꾼다는 것은 .env 를 고친다는 뜻이고,
- * 그 파일은 이미 .gitignore 에 있다.
+ * 예전에는 읽기 전용이었다. .env 가 유일한 출처였고 키를 되쓰는 곳이 없었다.
+ * 이제 설정 화면이 키를 저장할 수 있으므로, 같은 모양이 credentialStore 가
+ * 파일에 쓰는 것이기도 하다 — 어디에 떨어지고 대가가 무엇인지는 credstore.ts
+ * 에 적어 두었다.
  */
 export interface Credentials {
 	accessKeyId: string;
@@ -40,7 +41,9 @@ export function validateCredentials(c: Credentials): void {
 	if (c.secretAccessKey === '') missing.push('AWS_SECRET_ACCESS_KEY');
 	if (c.region === '') missing.push('AWS_REGION');
 	if (missing.length > 0) {
-		throw new Error(`missing ${missing.join(', ')}; add them to your .env file`);
+		throw new Error(
+			`missing ${missing.join(', ')}; set them on the settings page or in your .env file`
+		);
 	}
 }
 

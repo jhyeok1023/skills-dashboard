@@ -5,10 +5,16 @@
 
 import { Hono } from 'hono';
 
+import { connectionOk } from '../connect.ts';
 import { logger } from '../log.ts';
 import type { Service } from '../service.ts';
 import { mountWeb } from '../web/handler.ts';
 import { handleCheck } from './check.ts';
+import {
+	handleDeleteCredentials,
+	handleGetCredentials,
+	handlePutCredentials
+} from './credentials.ts';
 import { handlePage, handlePanel } from './panels.ts';
 import { fail, json } from './respond.ts';
 import {
@@ -39,8 +45,8 @@ export function createApp(service: Service): Hono {
 	// 먼저다 — 두 엔진의 응답을 바이트로 비교할 때 잡음이 되지 않게 맞춘다.
 	app.get('/api/health', () =>
 		json(200, {
-			credentials: service.credentialError === null,
-			ok: service.credentialError === null
+			credentials: connectionOk(service.aws),
+			ok: connectionOk(service.aws)
 		})
 	);
 	app.get('/api/meta', () => handleMeta(service));
@@ -49,6 +55,12 @@ export function createApp(service: Service): Hono {
 	app.get('/api/config', () => handleGetConfig(service));
 	app.put('/api/config', (c) => handlePutConfig(service, c));
 	app.post('/api/logfmt/preview', (c) => handleLogFormatPreview(service, c));
+
+	// 키 자체는 /api/config 와 따로 둔다. 설정 화면은 받은 설정 객체를 그대로
+	// 되돌려 저장하는데, 시크릿은 그런 왕복에 실릴 것이 아니다.
+	app.get('/api/credentials', () => handleGetCredentials(service));
+	app.put('/api/credentials', (c) => handlePutCredentials(service, c));
+	app.delete('/api/credentials', () => handleDeleteCredentials(service));
 
 	app.post('/api/check', (c) => handleCheck(service, c));
 

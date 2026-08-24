@@ -11,15 +11,14 @@ import type { AddressInfo } from 'node:net';
 import { getRequestListener } from '@hono/node-server';
 
 import { Cache } from './aws/cache.ts';
-import { globalWAFRegion, newClients, whoAmI } from './aws/client.ts';
-import { InsightsRunner } from './aws/insights.ts';
-import { MetricFetcher } from './aws/metrics.ts';
+import { CredentialStore, credentialsPath } from './config/credstore.ts';
+import { resolveEnvFile } from './config/env.ts';
 import { ConfigStore, configPath } from './config/store.ts';
-import { loadCredentials, redacted, resolveEnvFile, validateCredentials } from './config/env.ts';
+import { resolveConnection, setAWS } from './connect.ts';
 import { parseFlags } from './flags.ts';
 import { createApp } from './http/routes.ts';
 import { logger, setVerbose } from './log.ts';
-import { newService } from './service.ts';
+import { newService, type Service } from './service.ts';
 
 /** --port 를 명시하지 않았을 때 몇 개까지 더 시도하는지. */
 const portFallbacks = 5;
@@ -40,7 +39,12 @@ async function main(): Promise<void> {
 		ttlMs: cfg.limits.cacheTtlSeconds * 1000,
 		errorTtlMs: 5_000
 	});
-	const service = newService(store, cache);
+	const credPath = credentialsPath();
+	const credentials = new CredentialStore(credPath);
+	if (credentials.notice() !== '') {
+		logger.warn('saved credentials were ignored', { detail: credentials.notice(), file: credPath });
+	}
+	const service = newService(store, cache, credentials);
 
 	// 저장된 설정이 포기해야 했던 것은 두 번 말한다. 터미널을 보고 있는
 	// 사람에게 여기서 한 번, 설정 화면을 위해 /api/meta 로 한 번 — 값을 다시
@@ -49,7 +53,7 @@ async function main(): Promise<void> {
 		logger.warn('config was repaired on load', { detail: note, file: cfgPath });
 	}
 
-	loadCredentialsInto(service, flags.env);
+	findEnvFile(service, flags.env);
 	await connectAWS(service);
 
 	const app = createApp(service);
@@ -76,17 +80,14 @@ async function main(): Promise<void> {
 }
 
 /**
- * loadCredentialsInto 는 자격증명을 한 번 읽는다.
- *
- * 실패를 치명적으로 다루지 않고 들고 간다. UI 는 그대로 뜨고 설정 화면이 무엇을
- * 고쳐야 하는지 설명하는 편이, 운영자가 이유를 보기도 전에 종료하는 프로세스보다
- * 낫다.
+ * findEnvFile 은 .env 가 어디 있는지만 정한다. 그것을 읽어 AWS 에 붙는 일은
+ * connectAWS 가 한다.
  *
  * 명령줄로 준 경로는 반드시 있어야 한다. 그 외의 경우는 운영자가 거기 없는
  * 파일을 달라고 한 것이고, 자격증명 없이 계속 가면 엉뚱한 주제에 대한 메시지로
  * 답하게 된다.
  */
-function loadCredentialsInto(service: ReturnType<typeof newService>, named: string): void {
+function findEnvFile(service: Service, named: string): void {
 	let resolved;
 	try {
 		resolved = resolveEnvFile(named);
@@ -95,103 +96,40 @@ function loadCredentialsInto(service: ReturnType<typeof newService>, named: stri
 	}
 
 	if (resolved.path !== '') {
-		logger.info('reading credentials', { envFile: resolved.path });
+		logger.info('found a .env', { envFile: resolved.path });
 	} else {
 		logger.warn('no .env found; falling back to the process environment', {
 			tried: resolved.tried
 		});
 	}
 	service.envFile = resolved.path;
-
-	try {
-		const creds = loadCredentials(resolved.path);
-		try {
-			validateCredentials(creds);
-		} catch (err) {
-			// 파일이 아무 데도 없으면 빠진 키는 이야기의 절반일 뿐이다. 나머지
-			// 절반은 어디에 있어야 했는가다.
-			const detail =
-				resolved.path === ''
-					? `${message(err)} (.env 를 다음에서 찾지 못했습니다: ${resolved.tried.join(', ')})`
-					: message(err);
-			throw new Error(detail);
-		}
-		service.pendingCredentials = creds;
-	} catch (err) {
-		service.credentialError = err instanceof Error ? err : new Error(String(err));
-	}
-
-	if (service.credentialError !== null) {
-		logger.warn('AWS is unavailable; the UI will explain what to configure', {
-			error: service.credentialError,
-			envFile: service.envFile
-		});
-	}
+	envCandidates = resolved.tried;
 }
 
+/** .env 를 찾아본 자리. 아무 키도 없을 때 그 목록이 이야기의 나머지 절반이다. */
+let envCandidates: string[] = [];
+
 /**
- * connectAWS 는 클라이언트를 만들고 자격증명이 실제로 통하는지 확인한다.
+ * connectAWS 는 시작할 때 한 번 붙는다. 설정 화면이 키를 저장하면 같은 경로를
+ * 다시 탄다.
  *
- * 여기서도 실패는 들고 간다. 잘못된 키 하나로 프로세스가 죽으면 그것을 고칠
- * 설정 화면에 닿을 수 없다.
+ * 실패는 치명적으로 다루지 않고 들고 간다. 잘못된 키 하나로 프로세스가 죽으면
+ * 그것을 고칠 설정 화면에 닿을 수 없다.
  */
-async function connectAWS(service: ReturnType<typeof newService>): Promise<void> {
-	const creds = service.pendingCredentials;
-	if (creds === undefined) return;
-	service.pendingCredentials = undefined;
-
-	const store = service.store;
-	let cfg = store.get();
-
-	try {
-		const clients = newClients(creds, cfg.wafRegion === '' ? globalWAFRegion : cfg.wafRegion);
-		service.clients = clients;
-		service.metrics = new MetricFetcher(clients.cw);
-		service.insights = new InsightsRunner(clients.logs, {
-			concurrency: cfg.limits.insightsConcurrency,
-			timeoutMs: cfg.limits.queryTimeoutSeconds * 1000
-		});
-		// WAF 로그는 제 러너가 필요하다. CLOUDFRONT 범위 web ACL 은 us-east-1
-		// 에만 로그를 내보내므로, 작업 리전 클라이언트로 그 로그 그룹을 조회하면
-		// 없는 그룹이라며 실패한다. 두 리전이 같으면 러너를 공유해 동시 실행
-		// 상한이 같은 크기의 풀 둘이 아니라 하나로 남는다.
-		service.insightsGlobal =
-			clients.wafRegion === clients.region
-				? service.insights
-				: new InsightsRunner(clients.logsGlobal, {
-						concurrency: cfg.limits.insightsConcurrency,
-						timeoutMs: cfg.limits.queryTimeoutSeconds * 1000
-					});
-
-		// 리전을 정하는 것은 자격증명이고 config.json 은 그것을 기록할 뿐이다.
-		// 파일에 낡은 리전을 남겨 두는 것이, 대시보드가 한 리전을 따지면서 다른
-		// 리전을 부르게 만든 원인이었다.
-		if (cfg.region !== clients.region) {
-			logger.info("recording the credentials' region in the config", {
-				was: cfg.region,
-				now: clients.region
-			});
-			cfg = { ...cfg, region: clients.region };
-			try {
-				store.set(cfg);
-			} catch (err) {
-				logger.warn('could not save the region to the config', { error: message(err) });
-			}
-		}
-
-		const identity = await whoAmI(clients.sts, clients.region, AbortSignal.timeout(15_000));
-		identity.wafRegion = clients.wafRegion;
-		service.identity = identity;
-		logger.info('credentials accepted', {
-			account: identity.account,
-			region: identity.region,
-			wafRegion: identity.wafRegion,
-			key: redacted(creds)
-		});
-	} catch (err) {
-		service.credentialError = new Error(`자격증명 확인 실패: ${message(err)}`);
+async function connectAWS(service: Service): Promise<void> {
+	const conn = await resolveConnection(service);
+	if (conn.error !== null && conn.source !== 'saved' && service.envFile === '') {
+		// 파일이 아무 데도 없으면 빠진 키는 이야기의 절반일 뿐이다. 나머지 절반은
+		// 어디에 있어야 했는가다.
+		conn.error = new Error(
+			`${conn.error.message} (.env 를 다음에서 찾지 못했습니다: ${envCandidates.join(', ')})`
+		);
+	}
+	setAWS(service, conn);
+	if (conn.error !== null) {
 		logger.warn('AWS is unavailable; the UI will explain what to configure', {
-			error: service.credentialError,
+			error: conn.error,
+			source: conn.source,
 			envFile: service.envFile
 		});
 	}

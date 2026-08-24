@@ -72,8 +72,8 @@ export interface LogSource {
 
 export function podLogs(service: Service, rc: RequestCtx): LogSource {
 	return {
-		runner: service.insights,
-		region: serviceRegion(service),
+		runner: rc.aws.insights,
+		region: rc.aws.clients?.region ?? serviceRegion(service),
 		group: podLogGroupOrDefault(rc.cfg),
 		missing: '팟 로그 그룹이 설정되지 않았습니다. 설정에서 클러스터 또는 로그 그룹을 지정하세요.'
 	};
@@ -84,9 +84,9 @@ export function podLogs(service: Service, rc: RequestCtx): LogSource {
  * 주 러너로 물러난다.
  */
 export function wafLogs(service: Service, rc: RequestCtx): LogSource {
-	const region = serviceWAFRegion(service);
+	const region = rc.aws.clients?.wafRegion ?? serviceWAFRegion(service);
 	return {
-		runner: service.insightsGlobal ?? service.insights,
+		runner: rc.aws.insightsGlobal ?? rc.aws.insights,
 		region,
 		group: rc.cfg.wafLogGroup,
 		missing: `WAF 로그 그룹이 설정되지 않았습니다. CLOUDFRONT 스코프 WAF는 ${region}에만 로그를 남기므로, 설정에서 해당 리전의 aws-waf-logs-* 그룹을 지정하세요.`

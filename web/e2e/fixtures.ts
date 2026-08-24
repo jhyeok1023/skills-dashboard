@@ -573,6 +573,19 @@ const identity = {
 	wafRegion: 'us-east-1'
 };
 
+// A key read from .env with nothing saved over it — the state a fresh install
+// is in, and the one where the settings page shows both the form and the
+// sentence naming which of the two sources won.
+const credentials = {
+	accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+	secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+	sessionToken: '',
+	region: 'ap-northeast-2',
+	source: 'env',
+	envFile: 'D:\\source\\skills-dashboard\\.env',
+	saved: false
+};
+
 /**
  * Discovery answers, per kind. They differ by kind on purpose: the WAF log
  * group listing comes from us-east-1 and the working-region listing does not
@@ -717,6 +730,11 @@ export async function mockApi(page: Page) {
 		if (path === '/api/identity') return json(identity);
 		if (path === '/api/health') return json({ ok: true, credentials: true });
 		if (path === '/api/config') return json(config);
+
+		// The settings page reads the key it edits. Without this the credentials
+		// card renders its error state and every layout measurement below it
+		// shifts.
+		if (path === '/api/credentials') return json(credentials);
 
 		// A completed probe, whether or not the target was healthy: the check
 		// endpoint answers 200 either way, and the page reads `ok`.

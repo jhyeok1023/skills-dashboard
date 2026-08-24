@@ -12,6 +12,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jhyeok1023/skills-dashboard/internal/awsx"
@@ -20,29 +21,26 @@ import (
 )
 
 // Service carries everything a handler needs. One instance lives for the life
-// of the process, so the AWS clients and their connection pools are built once.
+// of the process.
 type Service struct {
-	Clients  *awsx.Clients
-	Store    *config.Store
-	Metrics  *awsx.MetricFetcher
-	Insights *awsx.InsightsRunner
-	Cache    *awsx.Cache
-	Identity awsx.Identity
-	Logger   *slog.Logger
+	Store  *config.Store
+	Cache  *awsx.Cache
+	Logger *slog.Logger
 
-	// InsightsGlobal queries the WAF region. A CLOUDFRONT-scoped web ACL
-	// publishes its logs only into us-east-1, so a runner bound to the working
-	// region cannot see the log group at all — StartQuery fails with a group
-	// that does not exist. When the two regions coincide this is the same
-	// runner as Insights, so the concurrency budget stays a single pool.
-	InsightsGlobal *awsx.InsightsRunner
+	// Credentials is the key saved from the settings page, if there is one.
+	Credentials *config.CredentialStore
+
+	// Connector overrides how a key becomes an AWS connection. Only tests set
+	// it; production leaves it nil and gets Connect.
+	Connector func(context.Context, config.Credentials, CredentialSource) *AWSConn
+
+	// conn is the AWS connection every handler reads, through AWS(). It is a
+	// pointer swap rather than a set of fields because the settings page can
+	// replace it while requests are in flight — see conn.go.
+	conn atomic.Pointer[AWSConn]
 
 	// Now is overridable so tests can pin the window.
 	Now func() time.Time
-
-	// CredentialError, when set, is why AWS is unreachable. Handlers report it
-	// instead of failing opaquely, so the settings page can explain what to fix.
-	CredentialError error
 
 	// EnvFile is the .env the credentials were read from, empty when none was
 	// found. It rides into the hint so "fix your .env" names an actual path
@@ -84,6 +82,13 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /api/config", s.handleGetConfig)
 	mux.HandleFunc("PUT /api/config", s.handlePutConfig)
 	mux.HandleFunc("POST /api/logfmt/preview", s.handleLogFormatPreview)
+
+	// The key itself, kept apart from /api/config: the settings page sends the
+	// config object it was given straight back on save, and a secret does not
+	// belong on a round trip like that.
+	mux.HandleFunc("GET /api/credentials", s.handleGetCredentials)
+	mux.HandleFunc("PUT /api/credentials", s.handlePutCredentials)
+	mux.HandleFunc("DELETE /api/credentials", s.handleDeleteCredentials)
 
 	// POST, though it reads rather than writes: every call sends a real request
 	// to a real service, so it must not be something a browser, a proxy or a
@@ -157,29 +162,35 @@ func upstream(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusBadGateway, err, "AWS 호출이 실패했습니다. 자격증명과 권한을 확인하세요.")
 }
 
-// credentialHint says what to edit and where. The settings page shows the hint
+// credentialHint says what to fix and where. The settings page shows the hint
 // in preference to the detail, so the path has to travel in the hint or it is
 // never seen.
+//
+// The page can now save a key itself, so that is what it leads with. The .env
+// path still rides along, because the operator who put a key there is the one
+// most likely to be looking for why it did not take.
 func (s *Service) credentialHint() string {
+	const fix = "설정 화면에서 AWS 액세스 키를 입력해 저장하세요."
 	if s.EnvFile == "" {
-		return "AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION 을 담은 .env 를 " +
-			"실행 파일과 같은 폴더나 ~/.skills-dashboard 에 두고 다시 실행하세요."
+		return fix + " .env 로 주려면 실행 파일과 같은 폴더나 ~/.skills-dashboard 에 두고 다시 실행하세요."
 	}
-	return s.EnvFile + " 에 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION 을 설정한 뒤 다시 실행하세요."
+	return fix + " 또는 " + s.EnvFile + " 에 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION 을 설정하세요."
 }
 
-// requireAWS reports whether the service has usable credentials.
-func (s *Service) requireAWS(w http.ResponseWriter) bool {
-	if s.CredentialError != nil {
-		writeError(w, http.StatusServiceUnavailable, s.CredentialError, s.credentialHint())
-		return false
+// requireAWS returns the connection a handler should use, or reports why there
+// is none. The snapshot is taken once per request: a save landing halfway
+// through must not move the ground under a page that is already building.
+func (s *Service) requireAWS(w http.ResponseWriter) (*AWSConn, bool) {
+	conn := s.AWS()
+	if !conn.ok() {
+		err := conn.Err
+		if err == nil {
+			err = errors.New("AWS clients are not configured")
+		}
+		writeError(w, http.StatusServiceUnavailable, err, s.credentialHint())
+		return nil, false
 	}
-	if s.Clients == nil {
-		writeError(w, http.StatusServiceUnavailable, errors.New("AWS clients are not configured"),
-			s.credentialHint())
-		return false
-	}
-	return true
+	return conn, true
 }
 
 // region is where the primary clients point, and wafRegion is where the
@@ -191,15 +202,15 @@ func (s *Service) requireAWS(w http.ResponseWriter) bool {
 // lands in is how the two came to disagree. With no clients there is nothing to
 // describe, so the config is all that is left to answer with.
 func (s *Service) region() string {
-	if s.Clients != nil {
-		return s.Clients.Region
+	if c := s.AWS(); c.Clients != nil {
+		return c.Clients.Region
 	}
 	return s.Store.Get().Region
 }
 
 func (s *Service) wafRegion() string {
-	if s.Clients != nil {
-		return s.Clients.WAFRegion
+	if c := s.AWS(); c.Clients != nil {
+		return c.Clients.WAFRegion
 	}
 	return s.Store.Get().WAFRegion
 }
@@ -235,9 +246,10 @@ func (s *Service) requestConfig(r *http.Request) (config.Config, error) {
 }
 
 func (s *Service) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	ok := s.AWS().ok()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":          s.CredentialError == nil,
-		"credentials": s.CredentialError == nil,
+		"ok":          ok,
+		"credentials": ok,
 	})
 }
 
@@ -283,12 +295,11 @@ func (s *Service) handleMeta(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Service) handleIdentity(w http.ResponseWriter, _ *http.Request) {
-	if s.CredentialError != nil {
-		writeError(w, http.StatusServiceUnavailable, s.CredentialError,
-			".env 파일에 AWS 액세스 키를 설정하세요.")
+	conn, ok := s.requireAWS(w)
+	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, s.Identity)
+	writeJSON(w, http.StatusOK, conn.Identity)
 }
 
 // panelBuilders maps a panel id to the function that assembles it. Panels are
@@ -335,7 +346,8 @@ var pages = map[string][]string{
 }
 
 func (s *Service) handlePanel(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAWS(w) {
+	conn, ok := s.requireAWS(w)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
@@ -355,7 +367,7 @@ func (s *Service) handlePanel(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err)
 		return
 	}
-	rc := requestCtx{ctx: r.Context(), w: win, cfg: cfg}
+	rc := requestCtx{ctx: r.Context(), w: win, cfg: cfg, aws: conn}
 	payload := domain.NewPayload(win)
 	panel, err := build(rc)
 	if err != nil {
@@ -370,7 +382,8 @@ func (s *Service) handlePanel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) handlePage(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAWS(w) {
+	conn, ok := s.requireAWS(w)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
@@ -404,7 +417,7 @@ func (s *Service) handlePage(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), pageBudget)
 	defer cancel()
 
-	rc := requestCtx{ctx: ctx, w: win, cfg: cfg}
+	rc := requestCtx{ctx: ctx, w: win, cfg: cfg, aws: conn}
 	payload := domain.NewPayload(win)
 
 	panels := s.buildPanels(rc, id, ids, s.panelBuilders())

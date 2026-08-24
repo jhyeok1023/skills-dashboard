@@ -1,6 +1,8 @@
 import type {
 	CheckResult,
 	Config,
+	Credentials,
+	CredentialsState,
 	DiscoveryResponse,
 	Identity,
 	LogFormat,
@@ -196,5 +198,25 @@ export const api = {
 		request<LogFormatPreview>('/api/logfmt/preview', {
 			method: 'POST',
 			body: JSON.stringify({ sample, format })
+		}),
+
+	credentials: () => request<CredentialsState>('/api/credentials'),
+
+	/**
+	 * Saving tries the key against AWS before it is written, so this is as slow
+	 * as one STS call plus the SDK's retries and needs the longer budget. A
+	 * rejected key comes back as a 502 carrying what AWS said.
+	 */
+	saveCredentials: (creds: Credentials) =>
+		request<CredentialsState>('/api/credentials', {
+			method: 'PUT',
+			body: JSON.stringify(creds),
+			signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
+		}),
+
+	clearCredentials: () =>
+		request<CredentialsState>('/api/credentials', {
+			method: 'DELETE',
+			signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
 		})
 };

@@ -421,6 +421,8 @@ func newTestService(t *testing.T) (*Service, http.Handler) {
 		Store: store,
 		Now:   func() time.Time { return testNow },
 		Cache: &awsx.Cache{TTL: time.Minute},
+	}
+	svc.SetAWS(&AWSConn{
 		Clients: &awsx.Clients{
 			Region: "ap-northeast-2", WAFRegion: "us-east-1",
 			CW: metrics, CWGlobal: metrics, Logs: logs, LogsGlobal: logsGlobal,
@@ -431,7 +433,8 @@ func newTestService(t *testing.T) (*Service, http.Handler) {
 		Insights:       &awsx.InsightsRunner{API: logs, Concurrency: 6, PollInterval: time.Millisecond},
 		InsightsGlobal: &awsx.InsightsRunner{API: logsGlobal, Concurrency: 6, PollInterval: time.Millisecond},
 		Metrics:        &awsx.MetricFetcher{},
-	}
+		Source:         SourceEnv,
+	})
 	return svc, svc.Handler()
 }
 
@@ -674,7 +677,7 @@ func TestHealthCheckPathsAreExcludedFromPodLogQueries(t *testing.T) {
 		t.Fatalf("status %d", rec.Code)
 	}
 
-	logs := svc.Clients.Logs.(*stubLogs)
+	logs := svc.AWS().Clients.Logs.(*stubLogs)
 	logs.mu.Lock()
 	started := append([]string(nil), logs.starts...)
 	logs.mu.Unlock()
@@ -701,7 +704,7 @@ func TestPodLogNamespaceCanOverrideTheStoredValue(t *testing.T) {
 	if rec := get(t, h, "/api/page/pod-logs?range=1h&period=5m&namespace=payments"); rec.Code != http.StatusOK {
 		t.Fatalf("status %d", rec.Code)
 	}
-	started := svc.Clients.Logs.(*stubLogs).startedQueries()
+	started := svc.AWS().Clients.Logs.(*stubLogs).startedQueries()
 	if len(started) == 0 {
 		t.Fatal("no pod-log queries were issued")
 	}
@@ -720,7 +723,7 @@ func TestPodLogNamespaceCanSelectAll(t *testing.T) {
 	if rec := get(t, h, "/api/page/pod-logs?range=1h&period=5m&namespace=%2A"); rec.Code != http.StatusOK {
 		t.Fatalf("status %d", rec.Code)
 	}
-	for _, q := range svc.Clients.Logs.(*stubLogs).startedQueries() {
+	for _, q := range svc.AWS().Clients.Logs.(*stubLogs).startedQueries() {
 		if strings.Contains(q, "kubernetes.namespace_name =") {
 			t.Errorf("all-namespace query still has a namespace filter:\n%s", q)
 		}
@@ -770,7 +773,7 @@ func TestExclusionCanBeClearedFromTheSettings(t *testing.T) {
 		t.Fatalf("clearing the list was undone by defaults: %v", got)
 	}
 
-	logs := svc.Clients.Logs.(*stubLogs)
+	logs := svc.AWS().Clients.Logs.(*stubLogs)
 	logs.mu.Lock()
 	logs.starts = nil
 	logs.mu.Unlock()
@@ -918,7 +921,7 @@ func TestUnknownPanelAndPageAreRejected(t *testing.T) {
 
 func TestCanceledPageRequestStopsBeforeBuildingPanels(t *testing.T) {
 	svc, h := newTestService(t)
-	metrics := svc.Clients.CW.(*stubMetrics)
+	metrics := svc.AWS().Clients.CW.(*stubMetrics)
 	req := httptest.NewRequest(http.MethodGet, "/api/page/overview", nil)
 	ctx, cancel := context.WithCancel(req.Context())
 	cancel()
@@ -934,7 +937,7 @@ func TestCanceledPageRequestStopsBeforeBuildingPanels(t *testing.T) {
 
 func TestMissingCredentialsExplainThemselves(t *testing.T) {
 	svc, _ := newTestService(t)
-	svc.CredentialError = fmt.Errorf("missing AWS_ACCESS_KEY_ID")
+	svc.SetAWS(&AWSConn{Source: SourceNone, Err: fmt.Errorf("missing AWS_ACCESS_KEY_ID")})
 	h := svc.Handler()
 
 	rec := get(t, h, "/api/page/overview")
@@ -945,7 +948,9 @@ func TestMissingCredentialsExplainThemselves(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(resp.Hint, ".env") {
+	// Both ways of supplying a key are named. The settings page comes first
+	// because it is the one that needs no restart.
+	if !strings.Contains(resp.Hint, "설정 화면") || !strings.Contains(resp.Hint, ".env") {
 		t.Errorf("hint does not say where credentials go: %q", resp.Hint)
 	}
 
@@ -1379,13 +1384,16 @@ func TestUnselectedResourcesProduceAnExplanationNotAnError(t *testing.T) {
 		Store: store,
 		Now:   func() time.Time { return testNow },
 		Cache: &awsx.Cache{TTL: time.Minute},
+	}
+	svc.SetAWS(&AWSConn{
 		Clients: &awsx.Clients{
 			Region: "ap-northeast-2", WAFRegion: "us-east-1",
 			CW: metrics, CWGlobal: metrics, Logs: logs, LogsGlobal: logs, EKS: stubEKS{},
 		},
 		Insights: &awsx.InsightsRunner{API: logs, PollInterval: time.Millisecond},
 		Metrics:  &awsx.MetricFetcher{},
-	}
+		Source:   SourceEnv,
+	})
 	h := svc.Handler()
 
 	for _, id := range []string{"targetgroup", "rds-proxy", "waf-metrics", "pod-cpu", "counts"} {
@@ -1557,8 +1565,8 @@ func TestWAFLogQueriesGoToTheWAFRegion(t *testing.T) {
 		t.Fatalf("status %d", rec.Code)
 	}
 
-	global := svc.Clients.LogsGlobal.(*stubLogs).startedGroups()
-	primary := svc.Clients.Logs.(*stubLogs).startedGroups()
+	global := svc.AWS().Clients.LogsGlobal.(*stubLogs).startedGroups()
+	primary := svc.AWS().Clients.Logs.(*stubLogs).startedGroups()
 
 	if len(global) == 0 {
 		t.Fatal("no query reached us-east-1")
@@ -1592,13 +1600,13 @@ func TestLogCacheIsKeyedByRegion(t *testing.T) {
 
 	// Identical in every respect but the region they are read from.
 	const shared = "same-name-in-both-regions"
-	primary := logSource{runner: svc.Insights, region: "ap-northeast-2", group: shared}
-	global := logSource{runner: svc.InsightsGlobal, region: "us-east-1", group: shared}
+	primary := logSource{runner: svc.AWS().Insights, region: "ap-northeast-2", group: shared}
+	global := logSource{runner: svc.AWS().InsightsGlobal, region: "us-east-1", group: shared}
 
 	svc.runLogQueries(rc, primary, "same-panel", []domain.Query{q})
 	svc.runLogQueries(rc, global, "same-panel", []domain.Query{q})
 
-	if got := svc.Clients.LogsGlobal.(*stubLogs).startedGroups(); len(got) == 0 {
+	if got := svc.AWS().Clients.LogsGlobal.(*stubLogs).startedGroups(); len(got) == 0 {
 		t.Error("the us-east-1 query was served from the working region's cache entry")
 	}
 }
@@ -1651,7 +1659,7 @@ func TestTargetGroupMetricsAreNotPinnedToOneLoadBalancer(t *testing.T) {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
 
-	exprs := svc.Clients.CW.(*stubMetrics).expressions()
+	exprs := svc.AWS().Clients.CW.(*stubMetrics).expressions()
 	if len(exprs) == 0 {
 		t.Fatal("the panel issued no queries")
 	}
@@ -1687,7 +1695,7 @@ func TestTargetGroupPanelStillScopesTheLoadBalancerFallback(t *testing.T) {
 		t.Fatalf("status %d", rec.Code)
 	}
 
-	for _, e := range svc.Clients.CW.(*stubMetrics).expressions() {
+	for _, e := range svc.AWS().Clients.CW.(*stubMetrics).expressions() {
 		if !strings.Contains(e, `LoadBalancer="app/my-alb/50dc6c495c0c9188"`) {
 			t.Errorf("the fallback lost its load balancer scope: %s", e)
 		}
@@ -1772,7 +1780,7 @@ func TestWebACLDiscoveryListsBothScopes(t *testing.T) {
 // ACLs" came to be said on the strength of one refused call.
 func TestWebACLDiscoveryReportsADiscardedScope(t *testing.T) {
 	svc, h := newTestService(t)
-	svc.Clients.WAFGlobal = stubWAF{
+	svc.AWS().Clients.WAFGlobal = stubWAF{
 		scope: waftypes.ScopeCloudfront,
 		err:   fmt.Errorf("AccessDeniedException: wafv2:ListWebACLs is not allowed"),
 	}
@@ -1793,7 +1801,7 @@ func TestWebACLDiscoveryReportsADiscardedScope(t *testing.T) {
 // with no reason to doubt it, which is indistinguishable from a complete one.
 func TestDiscoveryReportsATruncatedWalk(t *testing.T) {
 	svc, h := newTestService(t)
-	svc.Clients.ELB = endlessELB{}
+	svc.AWS().Clients.ELB = endlessELB{}
 
 	resp := discover(t, h, "/api/discovery/targetgroups")
 	if !resp.Truncated {
@@ -1822,7 +1830,7 @@ func (endlessELB) DescribeTargetGroups(context.Context, *elasticloadbalancingv2.
 // a bare status code.
 func TestDiscoveryFailureReachesTheBrowser(t *testing.T) {
 	svc, h := newTestService(t)
-	svc.Clients.RDS = stubRDS{err: fmt.Errorf("AccessDeniedException: rds:DescribeDBProxies is not allowed")}
+	svc.AWS().Clients.RDS = stubRDS{err: fmt.Errorf("AccessDeniedException: rds:DescribeDBProxies is not allowed")}
 
 	rec := get(t, h, "/api/discovery/rdsproxies")
 	if rec.Code != http.StatusBadGateway {
@@ -1855,7 +1863,7 @@ func TestResponsesAreNotBrowserCacheable(t *testing.T) {
 // Identical requests must not re-issue AWS calls within the cache window.
 func TestRepeatedRequestsAreServedFromCache(t *testing.T) {
 	svc, h := newTestService(t)
-	metrics := svc.Clients.CW.(*stubMetrics)
+	metrics := svc.AWS().Clients.CW.(*stubMetrics)
 
 	for i := 0; i < 5; i++ {
 		if rec := get(t, h, "/api/panel/counts?range=1h&period=5m"); rec.Code != http.StatusOK {
@@ -1972,7 +1980,7 @@ func (f *fixedMetrics) GetMetricData(_ context.Context, in *cloudwatch.GetMetric
 func withMetrics(t *testing.T, subjects []fixedSubject) http.Handler {
 	t.Helper()
 	svc, h := newTestService(t)
-	svc.Clients.CW = &fixedMetrics{subjects: subjects}
+	svc.AWS().Clients.CW = &fixedMetrics{subjects: subjects}
 	return h
 }
 
@@ -2137,7 +2145,7 @@ func TestPanelsWithChosenSubjectsKeepTheirSemanticColour(t *testing.T) {
 // A different window must not be served from another window's cache entry.
 func TestCacheIsKeyedByWindow(t *testing.T) {
 	svc, h := newTestService(t)
-	metrics := svc.Clients.CW.(*stubMetrics)
+	metrics := svc.AWS().Clients.CW.(*stubMetrics)
 
 	get(t, h, "/api/panel/counts?range=1h&period=5m")
 	get(t, h, "/api/panel/counts?range=4h&period=5m")

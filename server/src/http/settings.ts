@@ -107,13 +107,12 @@ export async function handlePutConfig(service: Service, c: Context): Promise<Res
  * 고쳐야 하는지 말한다.
  */
 export function handleIdentity(service: Service): Response {
-	if (service.credentialError !== null) {
-		return fail(503, service.credentialError, '.env 파일에 AWS 액세스 키를 설정하세요.');
-	}
-	if (service.identity === null) {
+	const { conn, denied } = requireAWS(service);
+	if (denied !== null) return fail(503, denied.error, denied.hint);
+	if (conn.identity === null) {
 		return fail(503, new Error('AWS clients are not configured'), credentialHint(service));
 	}
-	return json(200, service.identity);
+	return json(200, conn.identity);
 }
 
 /**
@@ -270,9 +269,9 @@ async function discoverWebACLs(clients: Clients, signal: AbortSignal): Promise<D
 }
 
 export async function handleDiscovery(service: Service, c: Context): Promise<Response> {
-	const denied = requireAWS(service);
+	const { conn, denied } = requireAWS(service);
 	if (denied !== null) return fail(503, denied.error, denied.hint);
-	const clients = service.clients as Clients;
+	const clients = conn.clients as Clients;
 
 	const kind = c.req.param('kind') ?? '';
 	const prefix = new URL(c.req.url).searchParams.get('prefix') ?? '';

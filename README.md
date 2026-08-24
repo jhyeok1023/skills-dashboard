@@ -40,13 +40,19 @@ SKILLS_DASHBOARD_ENGINE=node   node start.mjs   # 번들로 고정
 | `--verbose` | `false` | debug 로그 |
 | `--env` | — | 다른 `.env` 를 쓸 때. 준 경로가 없으면 실행이 실패합니다 |
 
-### `.env` 를 어디에 두나
+### 액세스 키를 어디에 두나
 
-바이너리 자체는 **실행 파일과 같은 폴더**를 먼저, 없으면 `~/.skills-dashboard/`(`config.json` 이 있는 곳)를 봅니다. 현재 작업 디렉터리는 보지 않습니다 — 어디서 실행했느냐에 따라 읽는 키가 달라지지 않게 하기 위해서입니다.
+두 가지 방법이 있고, **설정 화면에서 저장한 키가 `.env` 를 이깁니다.**
+
+설정 화면에 키를 입력하고 저장하면 AWS 에 한 번 물어본 뒤, 통과할 때만 `~/.skills-dashboard/credentials.json`(권한 0600)에 기록합니다. 재시작 없이 바로 적용됩니다. 화면에 `저장된 키 지우기` 가 있고, 지우면 `.env` 로 되돌아갑니다.
+
+`.env` 는 저장된 키가 없을 때 읽습니다. 바이너리 자체는 **실행 파일과 같은 폴더**를 먼저, 없으면 `~/.skills-dashboard/`(`config.json` 이 있는 곳)를 봅니다. 현재 작업 디렉터리는 보지 않습니다 — 어디서 실행했느냐에 따라 읽는 키가 달라지지 않게 하기 위해서입니다.
 
 그래서 `bin/` 안의 실행 파일을 직접 띄우면 저장소 루트의 `.env` 가 무시됩니다. `start.mjs` 가 `--env <저장소 루트>/.env` 를 대신 넘겨 주므로, **런처로 실행하는 한 `.env` 는 저장소 루트에 두면 됩니다.** 파일이 없으면 무엇을 해야 하는지 알려 주고 그대로 실행합니다 — 자격증명 없이도 대시보드는 뜨고, 설정 화면이 나머지를 설명합니다.
 
-`.env` 는 `.gitignore` 대상이라 clone 에 딸려 오지 않습니다. 액세스 키는 따로 옮기세요.
+지금 둘 중 어느 쪽으로 돌고 있는지는 설정 화면의 자격증명 카드가 말합니다. `.env` 를 고쳤는데 반영되지 않는다면 저장된 키가 이기고 있는 것입니다.
+
+`.env` 와 `credentials.json` 둘 다 clone 에 딸려 오지 않습니다. 액세스 키는 따로 옮기세요.
 
 ### 프로세스가 남았을 때
 
@@ -162,7 +168,7 @@ cd $env:TEMP\rehearsal
 node start.mjs
 ```
 
-`node_modules` 가 없는 상태에서 대시보드가 떠야 합니다. **엔진을 바꿔 두 번 하세요** — `SKILLS_DASHBOARD_ENGINE=node` 와 `=binary` 각각으로 뜨는지 봐야, 현장에서 한쪽이 막혔을 때 다른 쪽으로 넘어갈 수 있다는 것이 확인됩니다. `.env` 를 넣었다면 로그의 `reading credentials envFile=...` 이 **clone 루트**를 가리키는지 확인하세요 — `bin\.env` 를 가리키면 `--env` 전달이 동작하지 않은 것입니다.
+`node_modules` 가 없는 상태에서 대시보드가 떠야 합니다. **엔진을 바꿔 두 번 하세요** — `SKILLS_DASHBOARD_ENGINE=node` 와 `=binary` 각각으로 뜨는지 봐야, 현장에서 한쪽이 막혔을 때 다른 쪽으로 넘어갈 수 있다는 것이 확인됩니다. `.env` 를 넣었다면 로그의 `found a .env envFile=...` 이 **clone 루트**를 가리키는지 확인하세요 — `bin\.env` 를 가리키면 `--env` 전달이 동작하지 않은 것입니다.
 
 ### 구조
 
@@ -176,7 +182,7 @@ bin/                      커밋된 Go 실행 파일
 cmd/skills-dashboard/     진입점, http.Server
 internal/domain/          순수 로직 — 윈도, 쿼리 빌더, 응답 계약, 메트릭 카탈로그
 internal/awsx/            AWS 호출 — 인터페이스 경계, SEARCH 기반 메트릭, Insights 러너, 캐시
-internal/config/          .env 자격증명, 리소스 선택 저장
+internal/config/          자격증명(.env·저장된 키), 리소스 선택 저장
 internal/api/             HTTP 핸들러와 패널 빌더
 internal/web/             embed.FS + SPA 폴백
 
@@ -236,7 +242,9 @@ WAF 로그는 **action 단위로** 읽습니다. "이 경로에 4,000건"은 그
 
 ## 리전과 모니터링 대상
 
-리전은 두 개입니다. 작업 리전은 `.env` 의 `AWS_REGION` 이, WAF 리전은 `~/.skills-dashboard/config.json` 의 `wafRegion`(기본 `us-east-1`)이 정합니다. AWS 클라이언트는 시작할 때 한 번 만들어지므로 둘 중 무엇을 바꾸든 재시작해야 반영되며, 설정 화면은 두 값을 읽기 전용으로 보여 주기만 합니다.
+리전은 두 개입니다. 작업 리전은 자격증명의 `AWS_REGION` 이, WAF 리전은 `~/.skills-dashboard/config.json` 의 `wafRegion`(기본 `us-east-1`)이 정합니다.
+
+작업 리전은 설정 화면에서 키와 함께 바꿀 수 있고, 저장하면 재시작 없이 반영됩니다. WAF 리전은 아직 `config.json` 을 직접 고친 뒤 재시작해야 합니다.
 
 ### WAF 로그 그룹은 버지니아에 있습니다
 

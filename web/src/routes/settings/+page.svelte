@@ -1,22 +1,37 @@
 <script lang="ts">
 	import { api, ApiFailure } from '$lib/api';
-	import type { Config, DiscoveryResponse, Identity, LogFormatPreview, Resource } from '$lib/types';
+	import type {
+		Config,
+		CredentialsState,
+		DiscoveryResponse,
+		Identity,
+		LogFormatPreview,
+		Resource
+	} from '$lib/types';
 	import { appName, emptyFor } from '$lib/resources';
 	import CopyValue from '$lib/components/CopyValue.svelte';
 	import ResourcePicker from '$lib/components/ResourcePicker.svelte';
 
 	/**
-	 * Settings: what the dashboard watches, and how it reads a log line.
+	 * Settings: the key, what the dashboard watches, and how it reads a log line.
 	 *
-	 * Credentials are not edited here. They come from the .env the binary found
-	 * beside itself or in ~/.skills-dashboard, so this page reports what that key
-	 * resolved to and nothing more — there is no field that would put a secret
-	 * into a browser.
+	 * The key is edited here now. It used to be read-only on the grounds that a
+	 * field holding a secret is one more way for it to leak, and that is still
+	 * true — what changed is the other side of it: rotating a key meant editing
+	 * a file most people never find and restarting the process. Saving verifies
+	 * against AWS first and takes effect without a restart.
 	 */
 
 	let config = $state<Config | null>(null);
 	let identity = $state<Identity | null>(null);
 	let credentialProblem = $state('');
+
+	/** The key as the server reports it, and the form that edits it. */
+	let credentials = $state<CredentialsState | null>(null);
+	let secretShown = $state(false);
+	let credentialsSaving = $state(false);
+	let credentialsSaved = $state(false);
+	let credentialsError = $state('');
 	/**
 	 * What loading the stored config had to discard. A dropped value leaves a
 	 * panel empty, and an empty panel says nothing about why — so it is said
@@ -59,17 +74,76 @@
 			.catch((e) => (loadError = e instanceof ApiFailure ? e.message : String(e?.message ?? e)));
 	}
 
-	$effect(() => {
-		loadConfig();
-		api
+	function loadIdentity() {
+		identity = null;
+		credentialProblem = '';
+		return api
 			.identity()
 			.then((id) => (identity = id))
 			.catch((e) => (credentialProblem = e?.hint || e?.message || String(e)));
+	}
+
+	$effect(() => {
+		loadConfig();
+		loadIdentity();
+		api
+			.credentials()
+			.then((c) => (credentials = c))
+			.catch((e) => (credentialsError = e instanceof ApiFailure ? e.message : String(e)));
 		api
 			.meta()
 			.then((m) => (configNotices = m.notices ?? []))
 			.catch(() => {});
 	});
+
+	async function saveCredentials() {
+		if (!credentials) return;
+		credentialsSaving = true;
+		credentialsSaved = false;
+		credentialsError = '';
+		try {
+			credentials = await api.saveCredentials({
+				accessKeyId: credentials.accessKeyId.trim(),
+				secretAccessKey: credentials.secretAccessKey.trim(),
+				sessionToken: credentials.sessionToken?.trim() ?? '',
+				region: credentials.region.trim()
+			});
+			credentialsSaved = true;
+			setTimeout(() => (credentialsSaved = false), 2500);
+			// The whole page was assembled by whichever key was in force. The
+			// identity card is the part that is visibly wrong until it is refetched.
+			await loadIdentity();
+		} catch (e) {
+			credentialsError = e instanceof ApiFailure ? e.message : String(e);
+		} finally {
+			credentialsSaving = false;
+		}
+	}
+
+	async function clearCredentials() {
+		credentialsSaving = true;
+		credentialsSaved = false;
+		credentialsError = '';
+		try {
+			credentials = await api.clearCredentials();
+			await loadIdentity();
+		} catch (e) {
+			credentialsError = e instanceof ApiFailure ? e.message : String(e);
+		} finally {
+			credentialsSaving = false;
+		}
+	}
+
+	/** Which key the dashboard is running on, in words. */
+	function sourceLabel(state: CredentialsState): string {
+		if (state.source === 'saved') return '저장된 키를 쓰고 있습니다.';
+		if (state.source === 'env') {
+			return state.envFile
+				? `${state.envFile} 의 키를 쓰고 있습니다.`
+				: '환경변수의 키를 쓰고 있습니다.';
+		}
+		return '사용 중인 키가 없습니다.';
+	}
 
 	async function discover(kind: string, prefix = '') {
 		discovering = { ...discovering, [kind]: true };
@@ -160,6 +234,7 @@
 	<!-- Credentials -->
 	<section class="card stack">
 		<h2 data-value>자격증명</h2>
+
 		{#if identity}
 			<div class="kv">
 				<span class="muted tiny">계정</span>
@@ -173,19 +248,108 @@
 					<CopyValue value={identity.wafRegion} mono label="WAF 리전" />
 				{/if}
 			</div>
-			<p class="tiny muted" data-value>
-				액세스 키는 실행 파일과 같은 폴더의 .env, 없으면 ~/.skills-dashboard/.env 에서 읽습니다. 둘
-				다 없으면 환경변수를 씁니다. 이 화면에서는 수정하지 않습니다.
-			</p>
-			<p class="tiny muted" data-value>
-				리전은 .env 의 AWS_REGION, WAF 리전은 ~/.skills-dashboard/config.json 의 wafRegion 이
-				정합니다. AWS 클라이언트는 시작할 때 한 번 만들어지므로 변경하려면 재시작해야 합니다.
-			</p>
 		{:else}
 			<p class="warning" data-value>{credentialProblem || '자격증명을 확인하는 중입니다…'}</p>
-			<pre class="env" data-value>AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
-AWS_REGION=ap-northeast-2</pre>
+		{/if}
+
+		{#if credentials}
+			<div class="fields">
+				<div class="field">
+					<label for="accessKeyId">액세스 키 ID</label>
+					<input
+						id="accessKeyId"
+						class="control mono"
+						autocomplete="off"
+						spellcheck="false"
+						bind:value={credentials.accessKeyId}
+					/>
+				</div>
+
+				<div class="field">
+					<label for="secretAccessKey">시크릿 액세스 키</label>
+					<div class="row">
+						<input
+							id="secretAccessKey"
+							class="control mono grow"
+							type={secretShown ? 'text' : 'password'}
+							autocomplete="off"
+							spellcheck="false"
+							bind:value={credentials.secretAccessKey}
+						/>
+						<!-- The field is masked by default and revealed on request: the
+						     value has to be checkable when a save is refused, and unreadable
+						     the rest of the time. -->
+						<button
+							type="button"
+							class="control"
+							aria-pressed={secretShown}
+							onclick={() => (secretShown = !secretShown)}
+						>
+							{secretShown ? '가리기' : '보기'}
+						</button>
+					</div>
+				</div>
+
+				<div class="field">
+					<label for="sessionToken">세션 토큰</label>
+					<input
+						id="sessionToken"
+						class="control mono"
+						autocomplete="off"
+						spellcheck="false"
+						placeholder="임시 자격증명일 때만"
+						bind:value={credentials.sessionToken}
+					/>
+				</div>
+
+				<div class="field">
+					<label for="credRegion">리전</label>
+					<input
+						id="credRegion"
+						class="control mono"
+						autocomplete="off"
+						spellcheck="false"
+						bind:value={credentials.region}
+					/>
+				</div>
+			</div>
+
+			<div class="row">
+				<button
+					type="button"
+					class="control primary"
+					disabled={credentialsSaving}
+					onclick={saveCredentials}
+				>
+					{credentialsSaving ? '확인 중…' : '저장'}
+				</button>
+				{#if credentials.saved}
+					<button
+						type="button"
+						class="control"
+						disabled={credentialsSaving}
+						onclick={clearCredentials}
+					>
+						저장된 키 지우기
+					</button>
+				{/if}
+				{#if credentialsSaved}
+					<span class="badge" data-intent="good" data-value>저장되었습니다</span>
+				{/if}
+			</div>
+
+			{#if credentialsError}
+				<p class="warning" data-value>{credentialsError}</p>
+			{/if}
+
+			<p class="tiny muted" data-value>{sourceLabel(credentials)}</p>
+			<p class="tiny muted" data-value>
+				저장하면 AWS 에 한 번 물어본 뒤 통과할 때만 ~/.skills-dashboard/credentials.json 에
+				기록하고, 재시작 없이 바로 적용합니다. 저장된 키가 .env 보다 우선합니다.
+			</p>
+			<p class="tiny muted" data-value>
+				WAF 리전은 ~/.skills-dashboard/config.json 의 wafRegion 이 정합니다.
+			</p>
 		{/if}
 	</section>
 
@@ -724,17 +888,6 @@ AWS_REGION=ap-northeast-2</pre>
 		gap: 4px 12px;
 		align-items: baseline;
 		min-width: 0;
-	}
-
-	.env {
-		margin: 0;
-		padding: 10px;
-		border-radius: var(--radius-control);
-		background: var(--fill-secondary);
-		font-family: var(--font-mono);
-		font-size: 12px;
-		white-space: pre-wrap;
-		overflow-wrap: anywhere;
 	}
 
 	.preview {

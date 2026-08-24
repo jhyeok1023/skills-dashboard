@@ -7,6 +7,7 @@ import type { Config } from '../contract.ts';
 import { newPayload, Panel, validatePayload } from '../domain/series.ts';
 import { resolveWindow } from '../domain/window.ts';
 import { logger } from '../log.ts';
+import type { AWSConn } from '../connect.ts';
 import type { Service } from '../service.ts';
 import { requireAWS } from '../service.ts';
 import {
@@ -123,9 +124,15 @@ function abortSignalOf(c: Context): AbortSignal {
 	return c.req.raw.signal;
 }
 
-function windowAndConfig(service: Service, url: URL, signal: AbortSignal): RequestCtx {
+function windowAndConfig(
+	service: Service,
+	url: URL,
+	signal: AbortSignal,
+	aws: AWSConn
+): RequestCtx {
 	return {
 		signal,
+		aws,
 		w: resolveWindow(
 			service.now(),
 			url.searchParams.get('range') ?? '',
@@ -136,7 +143,7 @@ function windowAndConfig(service: Service, url: URL, signal: AbortSignal): Reque
 }
 
 export async function handlePanel(service: Service, c: Context): Promise<Response> {
-	const denied = requireAWS(service);
+	const { conn, denied } = requireAWS(service);
 	if (denied !== null) return fail(503, denied.error, denied.hint);
 
 	const id = c.req.param('id') ?? '';
@@ -145,7 +152,7 @@ export async function handlePanel(service: Service, c: Context): Promise<Respons
 
 	let rc: RequestCtx;
 	try {
-		rc = windowAndConfig(service, new URL(c.req.url), abortSignalOf(c));
+		rc = windowAndConfig(service, new URL(c.req.url), abortSignalOf(c), conn);
 	} catch (err) {
 		return badRequest(err);
 	}
@@ -163,7 +170,7 @@ export async function handlePanel(service: Service, c: Context): Promise<Respons
 }
 
 export async function handlePage(service: Service, c: Context): Promise<Response> {
-	const denied = requireAWS(service);
+	const { conn, denied } = requireAWS(service);
 	if (denied !== null) return fail(503, denied.error, denied.hint);
 
 	const id = c.req.param('id') ?? '';
@@ -184,7 +191,7 @@ export async function handlePage(service: Service, c: Context): Promise<Response
 
 	let rc: RequestCtx;
 	try {
-		rc = windowAndConfig(service, new URL(c.req.url), budget);
+		rc = windowAndConfig(service, new URL(c.req.url), budget, conn);
 	} catch (err) {
 		return badRequest(err);
 	}
