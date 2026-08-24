@@ -21,7 +21,14 @@ run = "npm ci"
 [tasks."web:build"]
 description = "Build the SvelteKit SPA into internal/web/dist"
 dir = "web"
-run = "npm run build"
+run = [
+  "npm run build",
+  # adapter-static empties the output directory first, which takes the .gitkeep
+  # with it — and that file is what keeps `//go:embed all:dist` compiling on a
+  # clone where the frontend has not been built yet. Putting it back here also
+  # keeps `git status` from reporting a deletion after every build.
+  'node -e "require(\"fs\").writeFileSync(\"../internal/web/dist/.gitkeep\", \"이 파일은 지우지 마세요. //go:embed all:dist 는 매칭 파일이 0개면 컴파일 에러입니다.\")"',
+]
 # Paths are relative to `dir`, so the build output is one level up.
 sources = ["src/**/*", "package.json", "vite.config.ts"]
 outputs = ["../internal/web/dist/index.html"]
@@ -44,20 +51,28 @@ run = "npm run check"
 description = "Run the API server on :8080 without embedding the UI"
 run = "go run ./cmd/skills-dashboard --port 8080"
 
+# The binaries land in bin/ and are committed. The venue has node but no Go
+# toolchain, so what cannot be rebuilt there has to arrive with the clone.
+#
+# The names carry node's process.platform and process.arch rather than GOOS and
+# GOARCH, so start.mjs assembles the filename it needs without translating
+# between two vocabularies. -w drops DWARF on top of -s: this is a file we
+# commit, and the debug info is a fifth of it.
+
 [tasks."build:windows"]
-description = "Cross-compile the single binary for Windows"
+description = "Cross-compile the committed binary for Windows"
 depends = ["web:build"]
-run = "go build -trimpath -ldflags=-s -o dist/skills-dashboard.exe ./cmd/skills-dashboard"
+run = 'go build -trimpath -ldflags="-s -w" -o bin/skills-dashboard-win32-x64.exe ./cmd/skills-dashboard'
 env = { GOOS = "windows", GOARCH = "amd64", CGO_ENABLED = "0" }
 
 [tasks."build:linux"]
-description = "Cross-compile the single binary for Linux"
+description = "Cross-compile the committed binary for Linux"
 depends = ["web:build"]
-run = "go build -trimpath -ldflags=-s -o dist/skills-dashboard ./cmd/skills-dashboard"
+run = 'go build -trimpath -ldflags="-s -w" -o bin/skills-dashboard-linux-x64 ./cmd/skills-dashboard'
 env = { GOOS = "linux", GOARCH = "amd64", CGO_ENABLED = "0" }
 
 [tasks.build]
-description = "Build both platform binaries"
+description = "Build both platform binaries into bin/"
 depends = ["build:windows", "build:linux"]
 
 # ---------------------------------------------------------------------------

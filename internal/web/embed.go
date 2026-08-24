@@ -48,7 +48,7 @@ pre{background:#e8e8ed;padding:1rem;border-radius:.6em;overflow-x:auto}
 <body><main>
 <h1>프론트엔드가 빌드되지 않았습니다</h1>
 <p>이 바이너리에는 웹 UI가 포함되어 있지 않습니다. 아래를 실행한 뒤 다시 빌드하세요.</p>
-<pre>mise run web:install
+<pre>npm run install:web
 mise run build</pre>
 <p>API는 정상 동작합니다. <code>/api/health</code> 로 확인할 수 있습니다.</p>
 </main></body></html>`
