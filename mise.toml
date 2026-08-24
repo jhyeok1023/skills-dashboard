@@ -10,18 +10,18 @@ _.file = { path = ".env", redact = true }
 #
 # The SvelteKit build writes straight into internal/web/dist so the Go embed
 # has nothing to copy. See web/vite.config.ts (adapter pages/assets options).
-# yarn is invoked through its vendored release so no corepack shim is needed.
+# npm ships with node, so the venue needs nothing installed beyond node itself.
 # ---------------------------------------------------------------------------
 
 [tasks."web:install"]
 description = "Install frontend dependencies"
 dir = "web"
-run = "node .yarn/releases/yarn-4.18.0.cjs install"
+run = "npm ci"
 
 [tasks."web:build"]
 description = "Build the SvelteKit SPA into internal/web/dist"
 dir = "web"
-run = "node .yarn/releases/yarn-4.18.0.cjs build"
+run = "npm run build"
 # Paths are relative to `dir`, so the build output is one level up.
 sources = ["src/**/*", "package.json", "vite.config.ts"]
 outputs = ["../internal/web/dist/index.html"]
@@ -29,12 +29,12 @@ outputs = ["../internal/web/dist/index.html"]
 [tasks."web:dev"]
 description = "Vite dev server on :5173, proxying /api to :8080"
 dir = "web"
-run = "node .yarn/releases/yarn-4.18.0.cjs dev"
+run = "npm run dev"
 
 [tasks."web:check"]
 description = "svelte-check"
 dir = "web"
-run = "node .yarn/releases/yarn-4.18.0.cjs check"
+run = "npm run check"
 
 # ---------------------------------------------------------------------------
 # go
@@ -68,7 +68,7 @@ depends = ["build:windows", "build:linux"]
 description = "Go unit tests + frontend unit tests"
 run = [
   "go test ./...",
-  "node web/.yarn/releases/yarn-4.18.0.cjs --cwd web test:unit --run",
+  "npm --prefix web run test:unit -- --run",
 ]
 
 [tasks."test:go"]
@@ -78,18 +78,18 @@ run = "go test ./..."
 [tasks."test:e2e"]
 description = "Playwright layout checks"
 dir = "web"
-run = "node .yarn/releases/yarn-4.18.0.cjs test:e2e"
+run = "npm run test:e2e"
 
 [tasks.lint]
 description = "go vet + prettier + eslint"
 run = [
   "go vet ./...",
-  "node web/.yarn/releases/yarn-4.18.0.cjs --cwd web lint",
+  "npm --prefix web run lint",
 ]
 
 [tasks.fmt]
 description = "gofmt + prettier"
 run = [
   "go fmt ./...",
-  "node web/.yarn/releases/yarn-4.18.0.cjs --cwd web format",
+  "npm --prefix web run format",
 ]

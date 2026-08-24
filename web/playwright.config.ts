@@ -6,8 +6,7 @@ export default defineConfig({
 	// The dashboard is a single-page app; `preview` serves the same build the
 	// Go binary embeds, so what is asserted here is what ships.
 	webServer: {
-		command:
-			'node .yarn/releases/yarn-4.18.0.cjs build && node .yarn/releases/yarn-4.18.0.cjs preview',
+		command: 'npm run build && npm run preview',
 		port: 4173,
 		// The build runs first, so the default 60s is not enough on a cold cache.
 		timeout: 240_000,

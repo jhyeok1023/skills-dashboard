@@ -1,15 +1,8 @@
 # Package Managers
 package-lock.json
 pnpm-lock.yaml
-yarn.lock
 bun.lock
 bun.lockb
-
-# Vendored tooling. `mise run fmt` reformatted the Yarn release once; nothing
-# good comes of rewriting a file we did not author and do not maintain.
-/.yarn/
-/.pnp.cjs
-/.pnp.loader.mjs
 
 # Generated
 /static/
