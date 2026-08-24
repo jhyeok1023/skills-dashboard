@@ -105,6 +105,10 @@ run = "npm run check"
 description = "Run the node engine on :8080 (the Go engine is go:run)"
 run = "node server/dist/skills-dashboard.mjs --port 8080 --open=false"
 
+[tasks.parity]
+description = "Compare the two engines' answers endpoint by endpoint"
+run = "node scripts/parity.mjs"
+
 # ---------------------------------------------------------------------------
 # quality
 # ---------------------------------------------------------------------------

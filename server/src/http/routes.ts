@@ -5,10 +5,17 @@
 
 import { Hono } from 'hono';
 
-import { logger } from '../log';
-import type { Service } from '../service';
-import { mountWeb } from '../web/handler';
-import { fail, json } from './respond';
+import { logger } from '../log.ts';
+import type { Service } from '../service.ts';
+import { mountWeb } from '../web/handler.ts';
+import { fail, json } from './respond.ts';
+import {
+	handleGetConfig,
+	handleIdentity,
+	handleLogFormatPreview,
+	handleMeta,
+	handlePutConfig
+} from './settings.ts';
 
 export function createApp(service: Service): Hono {
 	const app = new Hono();
@@ -16,12 +23,13 @@ export function createApp(service: Service): Hono {
 	// 핸들러 하나가 터져도 응답 하나로 끝나야 한다. Go 의 recoverPanics 와
 	// 같은 자리다. 버그가 아니게 되는 것은 아니므로 스택은 남긴다.
 	app.onError((err, c) => {
+		const path = new URL(c.req.url).pathname;
 		logger.error('panic while serving', {
-			path: new URL(c.req.url).pathname,
+			path,
 			panic: err.message,
 			stack: err.stack ?? ''
 		});
-		return fail(500, new Error(`internal error while serving ${new URL(c.req.url).pathname}`));
+		return fail(500, new Error(`internal error while serving ${path}`));
 	});
 
 	// 키 순서가 Go 와 같다. Go 는 map 을 정렬해 내보내므로 credentials 가
@@ -32,6 +40,12 @@ export function createApp(service: Service): Hono {
 			ok: service.credentialError === null
 		})
 	);
+	app.get('/api/meta', () => handleMeta(service));
+	app.get('/api/identity', () => handleIdentity(service));
+
+	app.get('/api/config', () => handleGetConfig(service));
+	app.put('/api/config', (c) => handlePutConfig(service, c));
+	app.post('/api/logfmt/preview', (c) => handleLogFormatPreview(service, c));
 
 	mountWeb(app);
 	return app;

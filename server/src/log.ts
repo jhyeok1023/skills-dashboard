@@ -7,7 +7,7 @@
 // credentials envFile=…` 으로 .env 가 제대로 넘어갔는지 본다. 엔진을 바꿨다고
 // 그 절차가 달라지면 두 트랙을 같은 방법으로 점검할 수 없다.
 
-export type LogValue = string | number | boolean | null | undefined | Error;
+export type LogValue = string | number | boolean | null | undefined | Error | readonly string[];
 
 const levels = { DEBUG: 10, INFO: 20, WARN: 30, ERROR: 40 } as const;
 
@@ -28,6 +28,8 @@ function quote(raw: string): string {
 function render(value: LogValue): string {
 	if (value instanceof Error) return quote(value.message);
 	if (value === null || value === undefined) return '<nil>';
+	// slog 는 []string 을 fmt 의 %v 로 낸다. 대괄호에 공백 구분이다.
+	if (Array.isArray(value)) return quote(`[${value.join(' ')}]`);
 	return quote(String(value));
 }
 

@@ -12,6 +12,10 @@
 		"noImplicitOverride": true,
 		"verbatimModuleSyntax": true,
 
+		// .ts 확장자를 붙여 임포트한다. 번들 없이 `node src/main.ts` 로 바로
+		// 돌려 볼 수 있고, esbuild 도 같은 경로를 그대로 해석한다.
+		"allowImportingTsExtensions": true,
+
 		"noEmit": true,
 		"skipLibCheck": true,
 		"isolatedModules": true

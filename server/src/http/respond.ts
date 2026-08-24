@@ -30,13 +30,12 @@ export function statusText(status: number): string {
  * no-store 를 붙이는 이유는 이 대시보드가 실시간 데이터를 읽기 때문이다.
  * 캐시된 응답이 돌아오면 사용자가 범위를 바꿨는데도 옛 창이 조용히 남는다.
  *
- * 끝의 개행은 Go 의 json.Encoder 가 붙이던 것이다. 한편 Go 는 `<`·`>`·`&` 를
- * < 식으로 이스케이프하고 JSON.stringify 는 하지 않는다 — 디코딩하면 같은
- * 값이라 프론트도 parity diff 도 구분하지 못하지만, 바이트로 비교하는 사람이
- * 있을까 봐 적어 둔다.
+ * 끝의 개행과 이스케이프 둘 다 Go 의 json.Encoder 를 따라간다. 두 엔진의
+ * 응답을 바이트로 비교하는 것이 이 이식의 주된 검증 수단이라, 디코딩하면 같은
+ * 값이라도 바이트가 갈리면 diff 가 잡음으로 가득 찬다.
  */
 export function json(status: number, value: unknown): Response {
-	return new Response(JSON.stringify(value) + '\n', {
+	return new Response(escapeLikeGo(JSON.stringify(value)) + '\n', {
 		status,
 		headers: {
 			'Content-Type': 'application/json; charset=utf-8',
@@ -44,6 +43,26 @@ export function json(status: number, value: unknown): Response {
 		}
 	});
 }
+
+/**
+ * escapeLikeGo 는 Go 의 json.Encoder 가 기본으로 하는 이스케이프를 흉내낸다.
+ *
+ * Go 는 HTML 안에 그대로 끼워 넣어도 안전하도록 `<`·`>`·`&` 를 이스케이프하고,
+ * JS 소스에 넣었을 때 줄이 끊기지 않도록 U+2028·U+2029 도 이스케이프한다.
+ * JSON 구조 문자에는 이 다섯이 절대 나오지 않으므로 직렬화된 문자열 전체를
+ * 훑어도 안전하다.
+ */
+function escapeLikeGo(body: string): string {
+	return body.replace(/[<>&\u2028\u2029]/g, (ch) => escapes[ch] as string);
+}
+
+const escapes: Record<string, string> = {
+	'<': '\\u003c',
+	'>': '\\u003e',
+	'&': '\\u0026',
+	'\u2028': '\\u2028',
+	'\u2029': '\\u2029'
+};
 
 export function fail(status: number, err: unknown, hint = ''): Response {
 	const detail = err instanceof Error ? err.message : String(err);

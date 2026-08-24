@@ -10,10 +10,12 @@ import type { AddressInfo } from 'node:net';
 
 import { getRequestListener } from '@hono/node-server';
 
-import { parseFlags } from './flags';
-import { createApp } from './http/routes';
-import { logger, setVerbose } from './log';
-import { newService } from './service';
+import { ConfigStore, configPath } from './config/store.ts';
+import { loadCredentials, redacted, resolveEnvFile, validateCredentials } from './config/env.ts';
+import { parseFlags } from './flags.ts';
+import { createApp } from './http/routes.ts';
+import { logger, setVerbose } from './log.ts';
+import { newService } from './service.ts';
 
 /** --port 를 명시하지 않았을 때 몇 개까지 더 시도하는지. */
 const portFallbacks = 5;
@@ -22,11 +24,23 @@ async function main(): Promise<void> {
 	const flags = parseFlags(process.argv.slice(2));
 	setVerbose(flags.verbose);
 
-	const service = newService();
+	const cfgPath = configPath();
+	let store: ConfigStore;
+	try {
+		store = ConfigStore.load(cfgPath);
+	} catch (err) {
+		throw new Error(`read the config at ${cfgPath}: ${message(err)}`);
+	}
+	const service = newService(store);
 
-	// TODO(config): .env 해석과 자격증명 적재는 다음 단계에서 붙인다.
-	// 지금은 런처가 넘기는 --env 를 받아 두기만 한다.
-	if (flags.env !== '') service.envFile = flags.env;
+	// 저장된 설정이 포기해야 했던 것은 두 번 말한다. 터미널을 보고 있는
+	// 사람에게 여기서 한 번, 설정 화면을 위해 /api/meta 로 한 번 — 값을 다시
+	// 골라야 하는 곳이 거기이기 때문이다.
+	for (const note of service.configNotices) {
+		logger.warn('config was repaired on load', { detail: note, file: cfgPath });
+	}
+
+	loadCredentialsInto(service, flags.env);
 
 	const app = createApp(service);
 
@@ -49,6 +63,66 @@ async function main(): Promise<void> {
 	if (flags.open) openBrowser(url);
 
 	installShutdown(server);
+}
+
+/**
+ * loadCredentialsInto 는 자격증명을 한 번 읽는다.
+ *
+ * 실패를 치명적으로 다루지 않고 들고 간다. UI 는 그대로 뜨고 설정 화면이 무엇을
+ * 고쳐야 하는지 설명하는 편이, 운영자가 이유를 보기도 전에 종료하는 프로세스보다
+ * 낫다.
+ *
+ * 명령줄로 준 경로는 반드시 있어야 한다. 그 외의 경우는 운영자가 거기 없는
+ * 파일을 달라고 한 것이고, 자격증명 없이 계속 가면 엉뚱한 주제에 대한 메시지로
+ * 답하게 된다.
+ */
+function loadCredentialsInto(service: ReturnType<typeof newService>, named: string): void {
+	let resolved;
+	try {
+		resolved = resolveEnvFile(named);
+	} catch (err) {
+		throw new Error(`read the .env at ${named}: ${message(err)}`);
+	}
+
+	if (resolved.path !== '') {
+		logger.info('reading credentials', { envFile: resolved.path });
+	} else {
+		logger.warn('no .env found; falling back to the process environment', {
+			tried: resolved.tried
+		});
+	}
+	service.envFile = resolved.path;
+
+	try {
+		const creds = loadCredentials(resolved.path);
+		try {
+			validateCredentials(creds);
+		} catch (err) {
+			// 파일이 아무 데도 없으면 빠진 키는 이야기의 절반일 뿐이다. 나머지
+			// 절반은 어디에 있어야 했는가다.
+			const detail =
+				resolved.path === ''
+					? `${message(err)} (.env 를 다음에서 찾지 못했습니다: ${resolved.tried.join(', ')})`
+					: message(err);
+			throw new Error(detail);
+		}
+		// TODO(aws): 여기서 클라이언트를 만들고 WhoAmI 로 신원을 확인한다.
+		// 그때까지 AWS 를 쓰는 엔드포인트는 requireAWS 에서 503 으로 막힌다.
+		logger.info('credentials accepted', { key: redacted(creds), region: creds.region });
+	} catch (err) {
+		service.credentialError = err instanceof Error ? err : new Error(String(err));
+	}
+
+	if (service.credentialError !== null) {
+		logger.warn('AWS is unavailable; the UI will explain what to configure', {
+			error: service.credentialError,
+			envFile: service.envFile
+		});
+	}
+}
+
+function message(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
 }
 
 function formatHost(addr: AddressInfo): string {

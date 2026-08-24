@@ -14,6 +14,7 @@
 		"check": "npm --prefix web run check",
 		"lint": "npm --prefix web run lint",
 		"format": "npm --prefix web run format",
+		"parity": "node scripts/parity.mjs",
 		"test": "npm --prefix web run test:unit -- --run",
 		"test:e2e": "npm --prefix web run test:e2e"
 	}
