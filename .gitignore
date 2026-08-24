@@ -12,6 +12,7 @@
 # 없지만, 실수로 생겼을 때 커밋되지는 않게 한다.
 /node_modules/
 /web/node_modules/
+/server/node_modules/
 
 # Test artefacts
 /web/test-results/

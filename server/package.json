@@ -1,0 +1,27 @@
+{
+	"name": "@skills-dashboard/server",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"description": "Go 백엔드의 Node 이식 — 대회장에서 exe 가 막혔을 때의 두 번째 트랙",
+	"scripts": {
+		"build": "node scripts/build.mjs",
+		"check": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@aws-sdk/client-cloudwatch": "^3.716.0",
+		"@aws-sdk/client-cloudwatch-logs": "^3.716.0",
+		"@aws-sdk/client-eks": "^3.716.0",
+		"@aws-sdk/client-elastic-load-balancing-v2": "^3.716.0",
+		"@aws-sdk/client-rds": "^3.716.0",
+		"@aws-sdk/client-sts": "^3.716.0",
+		"@aws-sdk/client-wafv2": "^3.716.0",
+		"@hono/node-server": "^1.13.0",
+		"hono": "^4.6.0"
+	},
+	"devDependencies": {
+		"@types/node": "^24",
+		"esbuild": "^0.25.0",
+		"typescript": "^6.0.3"
+	}
+}

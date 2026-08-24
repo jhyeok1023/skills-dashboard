@@ -11,7 +11,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { findBinary, killTree, repoRoot, withEnvFlag } from './launcher.mjs';
+import { findEngine, killTree, repoRoot, withEnvFlag } from './launcher.mjs';
 
 const webDir = join(repoRoot, 'web');
 
@@ -24,7 +24,7 @@ if (!existsSync(viteBin)) {
 	process.exit(1);
 }
 
-const bin = findBinary();
+const engine = findEngine();
 
 // --port 를 명시한다. vite.config.ts 의 프록시 타깃이 127.0.0.1:8080 으로
 // 고정이라, 명시하지 않으면 8080 이 막혔을 때 바이너리가 조용히 8081 로 옮겨
@@ -33,7 +33,7 @@ const bin = findBinary();
 //
 // --open=false 는 `=` 가 필수다. Go 의 bool 플래그는 `--open false` 를 받지
 // 않고 false 를 위치 인자로 흘려보낸다. 브라우저는 vite 쪽 주소로 열어야 한다.
-const api = spawn(bin, withEnvFlag(['--port', '8080', '--open=false']), {
+const api = spawn(engine.command, [...engine.args, ...withEnvFlag(['--port', '8080', '--open=false'])], {
 	stdio: ['ignore', 'pipe', 'pipe']
 });
 const web = spawn(process.execPath, [viteBin, 'dev'], {

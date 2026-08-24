@@ -76,6 +76,36 @@ description = "Build both platform binaries into bin/"
 depends = ["build:windows", "build:linux"]
 
 # ---------------------------------------------------------------------------
+# node
+#
+# 두 번째 엔진. 대회장에서 서명 없는 exe 가 막히면 이쪽으로 넘어간다.
+# 산출물은 server/dist/skills-dashboard.mjs 하나이고, bin/ 의 실행 파일과 같은
+# 이유로 커밋한다 — 거기서는 npm install 을 돌릴 수 없다.
+# ---------------------------------------------------------------------------
+
+[tasks."node:install"]
+description = "Install the node server's build dependencies"
+dir = "server"
+run = "npm ci"
+
+[tasks."node:build"]
+description = "Bundle the node engine into server/dist/skills-dashboard.mjs"
+dir = "server"
+depends = ["web:build"]
+run = "npm run build"
+sources = ["src/**/*.ts", "scripts/build.mjs", "package.json", "../internal/web/dist/index.html"]
+outputs = ["dist/skills-dashboard.mjs"]
+
+[tasks."node:check"]
+description = "tsc --noEmit over the node server"
+dir = "server"
+run = "npm run check"
+
+[tasks."node:run"]
+description = "Run the node engine on :8080 (the Go engine is go:run)"
+run = "node server/dist/skills-dashboard.mjs --port 8080 --open=false"
+
+# ---------------------------------------------------------------------------
 # quality
 # ---------------------------------------------------------------------------
 

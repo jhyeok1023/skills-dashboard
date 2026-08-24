@@ -1,4 +1,5 @@
-// 런처가 공유하는 두 가지 판단: 어느 실행 파일을 띄울지, .env 를 어떻게 넘길지.
+// 런처가 공유하는 세 가지 판단: 어느 엔진으로 띄울지, 어느 실행 파일을 띄울지,
+// .env 를 어떻게 넘길지.
 //
 // start.mjs 와 dev.mjs 가 같은 답을 내야 한다. 갈라지면 개발 중에는 되던 것이
 // 대회장에서 안 되고, 그 차이가 어디서 왔는지 보이지 않는다.
@@ -60,6 +61,72 @@ export function findBinary() {
 	ensureExecutable(found);
 	return found;
 }
+
+/** 순수 node 서버 번들. 있으면 exe 없이도 대시보드가 뜬다. */
+export const nodeBundle = join(repoRoot, 'server', 'dist', 'skills-dashboard.mjs');
+
+const engineKinds = ['node', 'binary'];
+
+/**
+ * findEngine 은 무엇을 띄울지 정한다.
+ *
+ * 트랙이 둘이다. `binary` 는 bin/ 에 커밋해 둔 Go 실행 파일이고, `node` 는
+ * server/dist 의 번들이다. 대회장에서 서명 없는 exe 가 Defender 나
+ * SmartScreen 에 막히면 손댈 수 있는 것이 없으므로, 그때 넘어갈 곳을 미리
+ * 만들어 둔다. 명령은 양쪽 다 `node start.mjs` 하나로 유지된다.
+ *
+ *   SKILLS_DASHBOARD_ENGINE=node    번들을 띄운다
+ *   SKILLS_DASHBOARD_ENGINE=binary  exe 를 띄운다
+ *   (지정하지 않으면) 번들이 있으면 node, 없으면 binary
+ *
+ * 기본값이 번들 쪽인 이유는 하나다. 번들이 있다는 것은 이 저장소가 node 트랙을
+ * 갖췄다는 뜻이고, 그렇다면 대회장에서 실제로 돌릴 것도 그쪽이다.
+ */
+export function findEngine() {
+	const requested = process.env.SKILLS_DASHBOARD_ENGINE?.trim();
+	if (requested && !engineKinds.includes(requested)) {
+		console.error(
+			[
+				'',
+				`SKILLS_DASHBOARD_ENGINE 값이 잘못되었습니다: ${requested}`,
+				`  ${engineKinds.join(' 또는 ')} 중 하나여야 합니다.`,
+				''
+			].join('\n')
+		);
+		process.exit(1);
+	}
+
+	const kind = requested || (existsSync(nodeBundle) ? 'node' : 'binary');
+
+	if (kind === 'node') {
+		if (!existsSync(nodeBundle)) {
+			console.error(
+				[
+					'',
+					'node 엔진을 요청했지만 번들이 없습니다.',
+					'',
+					`  ${nodeBundle}`,
+					'',
+					'아래로 만드세요. node 가 있는 기계라면 Go 툴체인이 없어도 됩니다.',
+					'',
+					'  npm --prefix server ci',
+					'  mise run node:build',
+					'',
+					'지금 당장 띄우려면 SKILLS_DASHBOARD_ENGINE=binary 로 exe 를 쓰세요.',
+					''
+				].join('\n')
+			);
+			process.exit(1);
+		}
+		// 번들을 실행하는 것은 지금 돌고 있는 바로 그 node 다. PATH 에 다른
+		// node 가 있어도 런처와 서버의 런타임이 갈라지지 않는다.
+		return { kind, command: process.execPath, args: [nodeBundle], label: nodeBundle };
+	}
+
+	const bin = findBinary();
+	return { kind, command: bin, args: [], label: bin };
+}
+
 
 // git 은 실행 비트를 보존하지만 zip 이나 USB 를 거치면 사라진다. Windows 에는
 // 해당 개념이 없다.
