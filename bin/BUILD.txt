@@ -1,4 +1,4 @@
-commit: 0cef463
-built : 2026-08-24T10:20:54Z
+commit: ad09c9f
+built : 2026-08-24T15:12:11Z
 go    : go1.26.5
 node  : v24.19.0
