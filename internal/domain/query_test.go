@@ -273,12 +273,13 @@ func TestErrorQueriesUseOnlyLogsInsightsSyntax(t *testing.T) {
 		}
 	}
 
-	// PodErrorList selects the message under the alias accessPreamble gives it,
-	// and Logs Insights will not compile a query that also re-aliases that.
-	// Selecting it and aliasing it to `raw` in the level filter is exactly what
-	// the service rejected.
-	if !strings.Contains(list.Text, ", dashboardMessage,") {
-		t.Fatalf("list query no longer selects the message, so the column would be empty:\n%s", list.Text)
+	// PodErrorList shows the message under the alias accessPreamble gives it,
+	// and it has to do that with `display`. Naming it in `fields` defines it a
+	// second time, which is the rejection that emptied this list in production;
+	// re-aliasing it in the level filter is the same rejection from the other
+	// side.
+	if !strings.Contains(list.Text, "| display @timestamp, dashboardMessage,") {
+		t.Fatalf("list query no longer displays the message, so the column would be empty:\n%s", list.Text)
 	}
 	for name, got := range map[string]Query{
 		"errors.series": series,
@@ -424,12 +425,110 @@ func TestPodBadStatusListSelectsTheCopyableColumns(t *testing.T) {
 		"coalesce(log_processed.status, ginStatusNumber) as status",
 		"coalesce(jsonLatencyMs, ginLatencyMs) as latencyMs",
 		"coalesce(log_processed.client_ip, ginClientIp) as clientIp",
+		// The panel reads its rows by column name, so every column it declares
+		// has to be on the display list or the table renders empty cells.
+		"| display @timestamp, pod, container, namespace, app, method, path, " +
+			"requestTarget, status, latencyMs, clientIp\n",
 		"sort @timestamp desc",
 	} {
 		if !strings.Contains(got.Text, want) {
 			t.Errorf("list query is missing %q:\n%s", want, got.Text)
 		}
 	}
+}
+
+// TestNoQueryDefinesAFieldTwice is the check that would have caught the
+// rejection this file's `display` clauses exist to avoid.
+//
+// Logs Insights refuses a query that defines the same ephemeral field twice —
+// "Ephemeral field is already defined: app" — and it refuses it at StartQuery,
+// so the panel degrades to an empty list beside a healthy-looking total rather
+// than to anything that reads as a failure. Both pod detail lists shipped that
+// way once accessPreamble started defining the aliases they were still naming
+// in `fields`.
+func TestNoQueryDefinesAFieldTwice(t *testing.T) {
+	q := LogQueries{Format: DefaultLogFormat()}
+	w := testWindow(t)
+
+	must := func(got Query, err error) Query {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	waf := WAFQueries{Headers: DefaultWAFHeaders()}
+	built := map[string]Query{
+		"pod.traffic":          must(q.PodTraffic(w)),
+		"pod.badStatus.series": must(q.PodBadStatusSeries(w)),
+		"pod.badStatus.byPath": must(q.PodBadStatusByPath()),
+		"pod.badStatus.list":   must(q.PodBadStatusList(w, 300)),
+		"pod.errors.series":    must(q.PodErrorSeries(w)),
+		"pod.errors.list":      must(q.PodErrorList(w, 300)),
+		"waf.action.series":    waf.ActionSeries(w),
+		"waf.byMethod":         waf.ByMethod(),
+		"waf.byPath":           waf.ByPath(100),
+		"waf.blocked":          waf.Blocked(100),
+		"waf.recent.list":      waf.RecentList(100),
+	}
+	for _, h := range DefaultWAFHeaders() {
+		built["waf.byHeader."+h] = must(waf.ByHeader(h, 100))
+	}
+
+	for name, got := range built {
+		seen := map[string]bool{}
+		for _, field := range definedFields(got.Text) {
+			if seen[field] {
+				t.Errorf("%s defines %q twice, which Logs Insights rejects at StartQuery:\n%s",
+					name, field, got.Text)
+			}
+			seen[field] = true
+		}
+	}
+}
+
+// aliasRe matches an `expr as name` binding, capRe a parse capture, and
+// bareFieldRe a name listed in a `fields` command — the three ways a query can
+// bring an ephemeral field into being. `display` is absent on purpose: it
+// selects what already exists.
+var (
+	aliasRe     = regexp.MustCompile(`\sas\s+([A-Za-z_][A-Za-z0-9_]*)`)
+	capRe       = regexp.MustCompile(`\(\?P?<([A-Za-z_][A-Za-z0-9_]*)>`)
+	bareFieldRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+)
+
+// definedFields lists every ephemeral field a query brings into being, in the
+// order it does so. A name that appears twice is what Insights rejects.
+func definedFields(text string) []string {
+	var out []string
+	// Captures are read from the raw text; everything else from the text with
+	// regex literals stripped, so a pattern's own `as` or comma cannot be read
+	// as query syntax.
+	for _, m := range capRe.FindAllStringSubmatch(text, -1) {
+		out = append(out, m[1])
+	}
+	stripped := withoutRegexLiterals(text)
+	for _, m := range aliasRe.FindAllStringSubmatch(stripped, -1) {
+		out = append(out, m[1])
+	}
+	for _, command := range strings.Split(stripped, "\n") {
+		command = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(command), "|"))
+		rest, ok := strings.CutPrefix(command, "fields ")
+		if !ok {
+			continue
+		}
+		for _, item := range strings.Split(rest, ",") {
+			item = strings.TrimSpace(item)
+			// `@timestamp` and the like are real log fields, not ephemeral
+			// ones, so naming them again is not a redefinition. Anything with
+			// an alias was already counted above.
+			if bareFieldRe.MatchString(item) {
+				out = append(out, item)
+			}
+		}
+	}
+	return out
 }
 
 func TestAutoPresetBuildsGinAndJSONAliases(t *testing.T) {

@@ -157,9 +157,9 @@ export class LogQueries {
 	levelFilter(): string {
 		// 시계열의 키 집합이 안정적이도록 두 갈래로 정규화한다.
 		//
-		// 메시지 필드는 별칭을 새로 달지 않고 그 자리에서 맞춘다. podErrorList 가
-		// 이미 그 필드를 이름으로 선택하는데, Logs Insights 는 필드를 선택하면서
-		// 동시에 재별칭하는 쿼리를 컴파일하지 않는다.
+		// 메시지 필드는 별칭을 새로 달지 않고 그 자리에서 맞춘다. preamble 이
+		// 이미 그 이름으로 정의해 두었고, Logs Insights 는 같은 ephemeral 필드를
+		// 두 번 정의하는 쿼리를 컴파일하지 않는다.
 		return (
 			'| fields tolower(rawLevel) as lvl\n' +
 			"| filter lvl in ['error', 'err', 'fatal', 'panic', 'warn', 'warning']\n" +
@@ -172,20 +172,34 @@ export class LogQueries {
 	}
 
 	/**
-	 * accessFields 는 상세 목록이 고르는 필드다.
+	 * accessFields 는 상세 목록이 직접 정의해야 하는 필드와, 목록이 내보내는
+	 * 컬럼 전체를 돌려준다.
+	 *
+	 * 둘을 나누는 이유는 Logs Insights 가 `fields` 안의 이름을 선택이 아니라
+	 * 정의로 읽기 때문이다 — 아래 recentList 가 적어 둔 그 규칙이다. 목록 쿼리에
+	 * 닿는 시점에는 accessPreamble 이 만든 별칭이 이미 전부 정의되어 있으므로,
+	 * 그중 하나를 `fields` 에 적으면 두 번 정의한 것이 되어 쿼리가 실행 전에
+	 * 거절된다. `display` 는 선택이라 컬럼 목록에 맞고, preamble 의 작업용 필드
+	 * (ginTarget, jsonLatencyMs, rawLevel, requestPath) 가 폴링마다 따라 나가는
+	 * 것도 함께 막는다.
 	 *
 	 * 고정된 셋은 애플리케이션의 로그 줄이 아니라 쿠버네티스 봉투에서 오므로,
 	 * 운영자가 로그 형식에 무엇을 적었든 존재한다. 그 덕에 이 패널은 User-Agent
 	 * 필드가 설정된 경우에만이 아니라 무조건 행 상세를 내줄 수 있다.
-	 *
-	 * 나머지는 accessPreamble 이 정의하는 별칭이므로, 줄이 JSON 으로 왔든 Gin
-	 * 액세스 로그로 왔든 같은 이름으로 읽힌다.
 	 */
-	accessFields(): string[] {
-		const out = [
+	accessFields(): { fields: string[]; columns: string[] } {
+		const fields = [
 			'kubernetes.pod_name as pod',
 			'kubernetes.container_name as container',
-			'kubernetes.namespace_name as namespace',
+			'kubernetes.namespace_name as namespace'
+		];
+		// 나머지는 accessPreamble 이 정의하는 별칭이므로, 줄이 JSON 으로 왔든
+		// Gin 액세스 로그로 왔든 같은 이름으로 읽힌다.
+		const columns = [
+			'@timestamp',
+			'pod',
+			'container',
+			'namespace',
 			'app',
 			'method',
 			'path',
@@ -198,12 +212,13 @@ export class LogQueries {
 		// 설정된 필드가 있을 때만 거기서 곧장 읽는다.
 		if (this.format.userAgentField !== '') {
 			try {
-				out.push(`${this.processedField(this.format.userAgentField)} as userAgent`);
+				fields.push(`${this.processedField(this.format.userAgentField)} as userAgent`);
 			} catch (err) {
 				throw new Error(`userAgentField: ${message(err)}`);
 			}
+			columns.push('userAgent');
 		}
-		return out;
+		return { fields, columns };
 	}
 
 	/**
@@ -410,12 +425,14 @@ export function podBadStatusByPath(lq: LogQueries): Query {
  * 모집단을 설명하는 일이 있을 수 없다.
  */
 export function podBadStatusList(lq: LogQueries, limit: number): Query {
+	const { fields, columns } = lq.accessFields();
 	const text =
 		lq.accessPreamble() +
-		`| fields @timestamp, ${lq.accessFields().join(', ')}\n` +
+		`| fields ${fields.join(', ')}\n` +
 		lq.namespace() +
 		lq.probes() +
 		`| filter ispresent(status) and ${notInStatuses('status', lq.format.okStatuses)}\n` +
+		`| display ${columns.join(', ')}\n` +
 		'| sort @timestamp desc\n' +
 		`| limit ${limit}`;
 	return query('pod.badStatus.list', text, limit);
@@ -441,10 +458,14 @@ export function podErrorSeries(lq: LogQueries, w: Window): Query {
 export function podErrorList(lq: LogQueries, limit: number): Query {
 	const text =
 		lq.accessPreamble() +
-		'| fields @timestamp, dashboardMessage, kubernetes.pod_name as pod, kubernetes.container_name as container\n' +
+		'| fields kubernetes.pod_name as pod, kubernetes.container_name as container\n' +
 		lq.namespace() +
 		lq.probes() +
 		lq.levelFilter() +
+		// 메시지는 preamble 이 이미 준 이름 그대로 내보낸다. 위 `fields` 에 그
+		// 이름을 적으면 두 번째 정의가 되어, levelFilter 주석이 말하는 바로 그
+		// 거절을 당한다.
+		'| display @timestamp, dashboardMessage, pod, container\n' +
 		'| sort @timestamp desc\n' +
 		`| limit ${limit}`;
 	return query('pod.errors.list', text, limit);

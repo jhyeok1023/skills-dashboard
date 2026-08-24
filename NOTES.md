@@ -6,11 +6,20 @@
 - 미해결:
   - 팟 애플리케이션 로그의 최종 형식 미확정. 현재 필드 매핑은 참고 구현의 실제 샘플에서 역산한 기본값이며, 설정 화면의 "샘플 붙여넣기 → 파싱 미리보기"로 확인 후 조정 필요.
   - 팟 min/max는 AWS API만으로 얻을 수 없어 구간 내 관측값을 사용. 정확한 HPA 값이 필요해지면 K8s API 도입 여부를 다시 결정해야 함.
-  - 실제 AWS 계정에 대한 엔드투엔드 확인 미실시(자격증명 없음). 모든 검증은 인터페이스 목킹과 픽스처 기반. WAF 브레이크다운의 `max(@timestamp) as lastTs`는 AWS 문서상 지원되는 stats 함수지만 실제 로그 그룹에서 실행해 보지 않았다.
+  - 실제 AWS 계정 확인은 팟 로그 패널까지만 했다(ap-northeast-2, 두 엔진 각각). WAF 패널과 메트릭 패널은 여전히 목킹과 픽스처로만 검증했고, WAF 브레이크다운의 `max(@timestamp) as lastTs`는 AWS 문서상 지원되는 stats 함수지만 실제 로그 그룹에서 실행해 보지 않았다.
   - `InsightsRunner`의 `Timeout`/`Concurrency`가 `once.Do` 안에서 굳어, 설정 화면에서 `queryTimeoutSeconds`를 바꿔도 재시작 전까지 반영되지 않는다.
 
 ## 결정 로그
 <!-- append -->
+
+### 2026-08-25 출력 컬럼은 `fields` 가 아니라 `display` 로 고른다
+
+- 맥락: `pod.badStatus.list` 와 `pod.errors.list` 가 실제 계정에서 `MalformedQueryException: Ephemeral field is already defined: app` / `: dashboardMessage` 로 거절됐다. `c5ae45b` 의 `accessPreamble` 이 `app`·`status`·`latencyMs`·`method`·`requestTarget`·`clientIp`·`path`·`dashboardMessage` 를 별칭으로 정의하는데, 두 목록 쿼리가 같은 이름을 `fields` 에 맨 이름으로 다시 적고 있었다. Logs Insights 는 `fields` 안의 이름을 선택이 아니라 정의로 읽는다. 집계 쿼리들이 멀쩡한 이유도 같다 — 별칭을 쓰기만 하고 다시 적지 않는다.
+- 이 규칙은 `WAFQueries.RecentList` 주석이 이미 이 에러 문구까지 인용해 적어 두었고, WAF 쪽은 `uaCapture as userAgent` 로 지키고 있었다. 팟 목록 쪽만 preamble 이 들어오면서 어긋났다.
+- 채택: preamble 이 정의한 이름은 `fields` 에서 빼고, 나갈 컬럼은 `| display` 로 지정한다. `display` 는 선택이므로 재정의가 아니다. preamble 의 작업용 필드(`ginTarget`, `jsonLatencyMs`, `rawLevel`, `requestPath`)가 폴링마다 딸려 나가던 것도 함께 없어진다.
+- 기각: 이름만 목록에서 빼는 안. 별칭이 결과에 실려 온다는 보장이 문서에 없고, 틀리면 400 이 아니라 **조용히 빈 패널**이 된다. 지금 증상보다 나쁘다.
+- 대가: 컬럼 목록이 한 군데 더 생겼다. 패널이 읽는 키와 `display` 목록이 어긋나면 빈 칸이 나므로, 테스트가 그 목록을 문자열로 붙들고 있다.
+- 검증: 빌더가 내는 쿼리 11개 전부에 대해 ephemeral 필드가 두 번 정의되는지 세는 테스트를 넣었다. 일부러 되돌려 놓고 돌려 보니 `pod.badStatus.list defines "app" twice` 로 잡는다. 두 엔진의 쿼리 문자열이 바이트로 같은 것을 확인했고, ap-northeast-2 실계정에서 두 패널 모두 목록이 찬다(각각 300행/1012건, 3행/3건).
 
 ### 2026-08-24 백엔드를 Node 로도 이식해 엔진을 둘로 둔다
 

@@ -341,7 +341,7 @@ func (q LogQueries) PodBadStatusList(w Window, limit int) (Query, error) {
 	if err != nil {
 		return Query{}, err
 	}
-	fields, err := q.accessFields()
+	fields, columns, err := q.accessFields()
 	if err != nil {
 		return Query{}, err
 	}
@@ -352,10 +352,11 @@ func (q LogQueries) PodBadStatusList(w Window, limit int) (Query, error) {
 
 	var b strings.Builder
 	b.WriteString(preamble)
-	fmt.Fprintf(&b, "| fields @timestamp, %s\n", strings.Join(fields, ", "))
+	fmt.Fprintf(&b, "| fields %s\n", strings.Join(fields, ", "))
 	b.WriteString(ns)
 	b.WriteString(probes)
 	fmt.Fprintf(&b, "| filter ispresent(status) and %s\n", notInStatuses("status", q.Format.OKStatuses))
+	fmt.Fprintf(&b, "| display %s\n", strings.Join(columns, ", "))
 	b.WriteString("| sort @timestamp desc\n")
 	fmt.Fprintf(&b, "| limit %d", limit)
 	return Query{ID: "pod.badStatus.list", Text: b.String(), Limit: limit}, nil
@@ -413,10 +414,14 @@ func (q LogQueries) PodErrorList(w Window, limit int) (Query, error) {
 
 	var b strings.Builder
 	b.WriteString(preamble)
-	b.WriteString("| fields @timestamp, dashboardMessage, kubernetes.pod_name as pod, kubernetes.container_name as container\n")
+	b.WriteString("| fields kubernetes.pod_name as pod, kubernetes.container_name as container\n")
 	b.WriteString(ns)
 	b.WriteString(probes)
 	b.WriteString(filter)
+	// The message is displayed under the name the preamble already gave it.
+	// Naming it in `fields` above would define it a second time, which is the
+	// same rejection the level filter's comment describes.
+	b.WriteString("| display @timestamp, dashboardMessage, pod, container\n")
 	b.WriteString("| sort @timestamp desc\n")
 	fmt.Fprintf(&b, "| limit %d", limit)
 	return Query{ID: "pod.errors.list", Text: b.String(), Limit: limit}, nil
@@ -429,9 +434,9 @@ func (q LogQueries) levelFilter() (string, error) {
 	var b strings.Builder
 	// Normalise into two buckets so the series has a stable set of keys.
 	//
-	// The message field is matched in place rather than aliased: PodErrorList
-	// already selects it by name, and Logs Insights refuses to compile a query
-	// that both selects a field and re-aliases it.
+	// The message field is matched in place rather than aliased: the preamble
+	// has already defined it under that name, and Logs Insights refuses to
+	// compile a query that defines the same ephemeral field twice.
 	b.WriteString("| fields tolower(rawLevel) as lvl\n")
 	b.WriteString("| filter lvl in ['error', 'err', 'fatal', 'panic', 'warn', 'warning']\n")
 	b.WriteString("    or (lvl = '' and not ispresent(status) and dashboardMessage like /(?i)\\b(error|fatal|panic|warn|warning|oomkilled)\\b/)\n")
@@ -440,20 +445,32 @@ func (q LogQueries) levelFilter() (string, error) {
 	return b.String(), nil
 }
 
-func (q LogQueries) accessFields() ([]string, error) {
-	// The three fixed ones come from the Kubernetes envelope, not from the
-	// application's own log line, so they are present whatever an operator has
-	// or has not named in the log format. That is what lets the panel offer a
-	// row detail unconditionally instead of only where a User-Agent field
-	// happens to be configured. PodErrorList already selects `container` under
-	// this name.
-	//
-	// The rest are the aliases accessPreamble defines, so they read the same
-	// whether the line arrived as JSON or as a Gin access log.
-	out := []string{
+// accessFields returns the columns the detail list has to define itself, and
+// the full set of columns it displays.
+//
+// The two are separate because Logs Insights reads a name in `fields` as a
+// definition rather than a selection — the rule RecentList documents below.
+// Every alias accessPreamble makes is already defined by the time a list
+// query gets here, so naming one in `fields` defines it twice and the query is
+// rejected before it runs. `display` selects, which is what a column list
+// actually wants: it also keeps the preamble's working fields — ginTarget,
+// jsonLatencyMs, rawLevel, requestPath — off a wire this list crosses on every
+// poll.
+func (q LogQueries) accessFields() ([]string, []string, error) {
+	// These come from the Kubernetes envelope, not from the application's own
+	// log line, so they are present whatever an operator has or has not named
+	// in the log format. That is what lets the panel offer a row detail
+	// unconditionally instead of only where a User-Agent field happens to be
+	// configured.
+	fields := []string{
 		"kubernetes.pod_name as pod",
 		"kubernetes.container_name as container",
 		"kubernetes.namespace_name as namespace",
+	}
+	// The rest are the aliases accessPreamble defines, so they read the same
+	// whether the line arrived as JSON or as a Gin access log.
+	columns := []string{
+		"@timestamp", "pod", "container", "namespace",
 		"app", "method", "path", "requestTarget", "status", "latencyMs", "clientIp",
 	}
 	// userAgent has no preamble alias: there is no default name to guess, so
@@ -461,11 +478,12 @@ func (q LogQueries) accessFields() ([]string, error) {
 	if q.Format.UserAgentField != "" {
 		f, err := q.processedField(q.Format.UserAgentField)
 		if err != nil {
-			return nil, fmt.Errorf("userAgentField: %w", err)
+			return nil, nil, fmt.Errorf("userAgentField: %w", err)
 		}
-		out = append(out, fmt.Sprintf("%s as userAgent", f))
+		fields = append(fields, fmt.Sprintf("%s as userAgent", f))
+		columns = append(columns, "userAgent")
 	}
-	return out, nil
+	return fields, columns, nil
 }
 
 // notInStatuses renders the healthy-code exclusion. An empty set means every
