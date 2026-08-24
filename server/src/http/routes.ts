@@ -8,6 +8,8 @@ import { Hono } from 'hono';
 import { logger } from '../log.ts';
 import type { Service } from '../service.ts';
 import { mountWeb } from '../web/handler.ts';
+import { handleCheck } from './check.ts';
+import { handlePage, handlePanel } from './panels.ts';
 import { fail, json } from './respond.ts';
 import {
 	handleDiscovery,
@@ -48,7 +50,12 @@ export function createApp(service: Service): Hono {
 	app.put('/api/config', (c) => handlePutConfig(service, c));
 	app.post('/api/logfmt/preview', (c) => handleLogFormatPreview(service, c));
 
+	app.post('/api/check', (c) => handleCheck(service, c));
+
 	app.get('/api/discovery/:kind', (c) => handleDiscovery(service, c));
+
+	app.get('/api/panel/:id', (c) => handlePanel(service, c));
+	app.get('/api/page/:id', (c) => handlePage(service, c));
 
 	mountWeb(app);
 	return app;

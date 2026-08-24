@@ -38,6 +38,18 @@ const panels = [
 ];
 const discovery = ['loadbalancers', 'targetgroups', 'loggroups', 'rdsproxies', 'webacls', 'clusters'];
 
+// POST 로 물어야 하는 것. 본문이 필요한 것은 여기서 함께 적는다.
+const posts = [
+	{ path: '/api/check', body: null },
+	{
+		path: '/api/logfmt/preview',
+		body: {
+			sample:
+				'{"time":"2026-08-24T11:00:00Z","log":"x","kubernetes":{"pod_name":"p","namespace_name":"default","container_name":"app"},"log_processed":{"status":503,"path":"/v1/a?b=1","method":"GET","latency_ms":9.5,"client_ip":"1.2.3.4"}}'
+		}
+	}
+];
+
 const endpoints = [
 	'/api/health',
 	'/api/meta',
@@ -85,10 +97,16 @@ function scrubPaths(text) {
 	return out;
 }
 
-async function fetchBody(port, path) {
-	const res = await fetch(`http://127.0.0.1:${port}${path}`, {
-		signal: AbortSignal.timeout(120_000)
-	});
+async function fetchBody(port, path, post) {
+	const init = { signal: AbortSignal.timeout(120_000) };
+	if (post !== undefined) {
+		init.method = 'POST';
+		if (post !== null) {
+			init.headers = { 'Content-Type': 'application/json' };
+			init.body = JSON.stringify(post);
+		}
+	}
+	const res = await fetch(`http://127.0.0.1:${port}${path}`, init);
 	const text = await res.text();
 	let body;
 	try {
@@ -147,8 +165,16 @@ let same = 0;
 let missing = 0;
 const failures = [];
 
-for (const path of endpoints) {
-	const [go, nd] = await Promise.all([fetchBody(goPort, path), fetchBody(nodePort, path)]);
+const requests = [
+	...endpoints.map((path) => ({ path, post: undefined })),
+	...posts.map((p) => ({ path: p.path, post: p.body }))
+];
+
+for (const { path, post } of requests) {
+	const [go, nd] = await Promise.all([
+		fetchBody(goPort, path, post),
+		fetchBody(nodePort, path, post)
+	]);
 
 	// node 쪽이 아직 그 엔드포인트를 모르는 것은 실패가 아니라 진행 상황이다.
 	if (nd.status === 404 && go.status !== 404) {
