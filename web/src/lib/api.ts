@@ -153,17 +153,12 @@ export const api = {
 	identity: () => request<Identity>('/api/identity'),
 	health: () => request<{ ok: boolean; credentials: boolean }>('/api/health'),
 
-<<<<<<< HEAD
 	page: (id: string, range: string, period: string, signal?: AbortSignal, namespace = '') =>
-		request<Payload>(`/api/page/${id}${windowQuery(range, period, namespace)}`, { signal }),
-=======
-	page: (id: string, range: string, period: string, signal?: AbortSignal) =>
 		request<Payload>(
-			`/api/page/${id}${windowQuery(range, period)}`,
+			`/api/page/${id}${windowQuery(range, period, namespace)}`,
 			{ signal: pageSignal(signal) },
 			PAGE_TIMEOUT_MS
 		),
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 
 	panel: (id: string, range: string, period: string, signal?: AbortSignal) =>
 		request<Payload>(
@@ -174,12 +169,6 @@ export const api = {
 
 	config: async () => normalizeConfig(await request<Config>('/api/config')),
 
-<<<<<<< HEAD
-	saveConfig: async (cfg: Config) =>
-		normalizeConfig(
-			await request<Config>('/api/config', { method: 'PUT', body: JSON.stringify(cfg) })
-		),
-=======
 	/**
 	 * POST, though it reads: every call sends a real request to a real service.
 	 * Its own timeout is longer than the server's 10s probe budget, so the
@@ -191,9 +180,10 @@ export const api = {
 			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
 		}),
 
-	saveConfig: (cfg: Config) =>
-		request<Config>('/api/config', { method: 'PUT', body: JSON.stringify(cfg) }),
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
+	saveConfig: async (cfg: Config) =>
+		normalizeConfig(
+			await request<Config>('/api/config', { method: 'PUT', body: JSON.stringify(cfg) })
+		),
 
 	discover: (kind: string, prefix = '') => {
 		const q = prefix ? `?prefix=${encodeURIComponent(prefix)}` : '';

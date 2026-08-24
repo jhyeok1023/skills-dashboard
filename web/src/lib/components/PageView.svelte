@@ -65,7 +65,10 @@
 		loading = true;
 		error = null;
 		try {
-<<<<<<< HEAD
+			// `payload` is deliberately not cleared first. A refresh keeps the
+			// numbers that are already on screen and marks the refresh in the
+			// control; blanking the page to a skeleton would hide readable data
+			// to report that newer data is on its way.
 			payload = await api.page(
 				pageId,
 				timeRange.range,
@@ -73,14 +76,7 @@
 				current.signal,
 				namespaceFilter ? appliedNamespace : ''
 			);
-=======
-			// `payload` is deliberately not cleared first. A refresh keeps the
-			// numbers that are already on screen and marks the refresh in the
-			// control; blanking the page to a skeleton would hide readable data
-			// to report that newer data is on its way.
-			payload = await api.page(pageId, timeRange.range, timeRange.period, controller.signal);
 			lastLoadedAt = Date.now();
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 		} catch (e) {
 			if (e instanceof DOMException && e.name === 'AbortError') return;
 			error = e instanceof ApiFailure ? e : new ApiFailure(0, String(e));
@@ -142,8 +138,13 @@
 			}
 		});
 
-<<<<<<< HEAD
-		if (!timeRange.isValid(range, period)) return;
+		// Untracked too, and for the same reason the URL write is: `isValid`
+		// reads `timeRange.ranges`, and `/api/meta` replaces that array once per
+		// session. Read tracked, that one assignment re-ran this effect with an
+		// unchanged range and period — a second, identical request whose first
+		// act is to abort the first one. What this effect is about is the
+		// selection, and the selection is already tracked above.
+		if (!untrack(() => timeRange.isValid(range, period))) return;
 		const key = `${pageId}\u0000${range}\u0000${period}\u0000${namespace}\u0000${nonce}`;
 		if (key === requestedKey) return;
 		requestedKey = key;
@@ -152,21 +153,8 @@
 
 	$effect(() => () => controller?.abort());
 
-	// Auto-refresh, off unless the operator asks for it.
-=======
-		// Untracked too, and for the same reason the URL write is: `isValid`
-		// reads `timeRange.ranges`, and `/api/meta` replaces that array once per
-		// session. Read tracked, that one assignment re-ran this effect with an
-		// unchanged range and period — a second, identical request whose first
-		// act is to abort the first one. What this effect is about is the
-		// selection, and the selection is already tracked above.
-		if (!untrack(() => timeRange.isValid(range, period))) return;
-		void load();
-	});
-
 	// Auto-refresh, off unless the operator asks for it — and quiet while the
 	// tab is hidden: each tick is a paid Insights scan nobody is looking at.
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 	$effect(() => {
 		const seconds = timeRange.refreshSeconds;
 		if (seconds <= 0) return;
@@ -174,12 +162,14 @@
 	});
 </script>
 
-<<<<<<< HEAD
-<div class="page stack">
-	<header class="stack head">
-		<h1 data-value>{title}</h1>
-		{#if description}<p class="muted tiny" data-value>{description}</p>{/if}
-		<TimeRangePicker window={payload?.window ?? null} {loading} />
+<div class="page">
+	<!-- Fixed above the data: the time controls stay on screen while the
+	     panels scroll under them. -->
+	<div class="head-sticky">
+		<header class="head-row">
+			<h1 data-value>{title}</h1>
+			<TimeRangePicker window={payload?.window ?? null} {loading} {lastLoadedAt} />
+		</header>
 		{#if namespaceFilter}
 			<form class="scope-bar" onsubmit={submitNamespace}>
 				<div class="scope-name">
@@ -212,20 +202,9 @@
 				</span>
 			</form>
 		{/if}
-	</header>
-=======
-<div class="page">
-	<!-- Fixed above the data: the time controls stay on screen while the
-	     panels scroll under them. -->
-	<div class="head-sticky">
-		<header class="head-row">
-			<h1 data-value>{title}</h1>
-			<TimeRangePicker window={payload?.window ?? null} {loading} {lastLoadedAt} />
-		</header>
 	</div>
 
 	{#if description}<p class="desc muted tiny" data-value>{description}</p>{/if}
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 
 	{#if error}
 		<div class="card error" role="alert">
@@ -303,7 +282,6 @@
 		color: var(--intent-bad);
 	}
 
-<<<<<<< HEAD
 	.scope-bar {
 		display: flex;
 		flex-wrap: wrap;
@@ -344,13 +322,13 @@
 		padding: 2px 6px;
 		color: var(--label-secondary);
 		font-size: 11.5px;
-=======
+	}
+
 	/* A refresh keeps the old numbers on screen (see load()), so while one is
 	   in flight the grid has to look stale, not current. Opacity only — it
 	   composites, and the dip appears within the same tick as the click. */
 	.grid[aria-busy='true'] {
 		opacity: 0.6;
 		transition: opacity var(--dur-instant) var(--ease-out);
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 	}
 </style>

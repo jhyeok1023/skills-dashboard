@@ -494,14 +494,8 @@ func (c Config) clone() Config {
 	out.TargetGroups = append([]string{}, c.TargetGroups...)
 	out.RDSProxies = append([]string{}, c.RDSProxies...)
 	out.WebACLs = append([]string{}, c.WebACLs...)
-<<<<<<< HEAD
-	out.WAFHeaders = append([]string(nil), c.WAFHeaders...)
-	out.LogFormat.OKStatuses = append([]int(nil), c.LogFormat.OKStatuses...)
-	out.LogFormat.ExcludePaths = append([]string(nil), c.LogFormat.ExcludePaths...)
-=======
 	out.WAFHeaders = append([]string{}, c.WAFHeaders...)
 	out.LogFormat.OKStatuses = append([]int{}, c.LogFormat.OKStatuses...)
 	out.LogFormat.ExcludePaths = append([]string{}, c.LogFormat.ExcludePaths...)
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 	return out
 }

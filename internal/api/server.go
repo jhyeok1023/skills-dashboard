@@ -10,11 +10,8 @@ import (
 	"net/http"
 	"regexp"
 	"runtime/debug"
-<<<<<<< HEAD
 	"strings"
-=======
 	"sync"
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 	"time"
 
 	"github.com/jhyeok1023/skills-dashboard/internal/awsx"
@@ -388,24 +385,12 @@ func (s *Service) handlePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-<<<<<<< HEAD
 	cfg, err := s.requestConfig(r)
 	if err != nil {
 		badRequest(w, err)
 		return
 	}
-	rc := requestCtx{ctx: r.Context(), w: win, cfg: cfg}
-	builders := s.panelBuilders()
-	payload := domain.NewPayload(win)
 
-	// Panels are built sequentially against a shared cache; the expensive work
-	// underneath is already concurrent, and a failing panel must not blank the
-	// ones beside it.
-	for _, pid := range ids {
-		if rc.ctx.Err() != nil {
-			return
-		}
-=======
 	// A page sits on a wave of Logs Insights queries and can outlast the
 	// server's own WriteTimeout — at which point Go closes the connection
 	// mid-response and the browser reports a transport failure, blanking the
@@ -419,11 +404,18 @@ func (s *Service) handlePage(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), pageBudget)
 	defer cancel()
 
-	rc := requestCtx{ctx: ctx, w: win, cfg: s.Store.Get()}
+	rc := requestCtx{ctx: ctx, w: win, cfg: cfg}
 	payload := domain.NewPayload(win)
 
+	panels := s.buildPanels(rc, id, ids, s.panelBuilders())
+	// The budget expiring is different from the browser leaving: the first
+	// still has partial panels worth rendering, the second has nobody to
+	// render them to.
+	if r.Context().Err() != nil {
+		return
+	}
 	// Payload.Add is a bare append, so it stays on this goroutine.
-	for _, panel := range s.buildPanels(rc, id, ids, s.panelBuilders()) {
+	for _, panel := range panels {
 		if panel != nil {
 			payload.Add(panel)
 		}
@@ -459,30 +451,21 @@ func (s *Service) buildPanels(rc requestCtx, page string, ids []string, builders
 	// panel is the slow one" without adding a line per panel to every refresh.
 	pageStarted := time.Now()
 
+	// A request the browser has already dropped must not open a wave of paid
+	// Insights scans. Sequential building used to check this between panels;
+	// building them at once means checking before the wave and again inside
+	// each goroutine, since a cancellation can land after the wave starts.
+	if rc.ctx.Err() != nil {
+		return nil
+	}
+
 	results := make([]*domain.Panel, len(ids))
 	var wg sync.WaitGroup
 	for i, pid := range ids {
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 		build, ok := builders[pid]
 		if !ok {
 			continue
 		}
-<<<<<<< HEAD
-		panel, err := build(rc)
-		if err != nil {
-			if rc.ctx.Err() != nil {
-				return
-			}
-			s.log().Warn("panel failed", "panel", pid, "error", err)
-			payload.Add(&domain.Panel{
-				ID:       pid,
-				Title:    pid,
-				Warnings: []string{err.Error()},
-			})
-			continue
-		}
-		payload.Add(panel)
-=======
 		wg.Add(1)
 		go func(i int, pid string, build panelBuilder) {
 			defer wg.Done()
@@ -500,6 +483,9 @@ func (s *Service) buildPanels(rc requestCtx, page string, ids []string, builders
 					"stack", string(debug.Stack()))
 				results[i] = warnPanel(pid, fmt.Errorf("패널을 만들지 못했습니다: %v", rec))
 			}()
+			if rc.ctx.Err() != nil {
+				return
+			}
 			started := time.Now()
 			panel, err := build(rc)
 			s.log().Debug("panel built", "page", page, "panel", pid,
@@ -525,7 +511,6 @@ func warnPanel(id string, err error) *domain.Panel {
 		ID:       id,
 		Title:    id,
 		Warnings: []string{err.Error()},
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 	}
 }
 

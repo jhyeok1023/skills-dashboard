@@ -69,8 +69,22 @@ func TestLoadEnvFileMissingIsNotAnError(t *testing.T) {
 }
 
 func TestEnvFileCandidates(t *testing.T) {
-	got := envFileCandidates("/opt/dash", "/home/u/.skills-dashboard")
-	want := []string{"/opt/dash/.env", "/home/u/.skills-dashboard/.env"}
+	// The expectation goes through the same Join and Abs the candidates do,
+	// rather than being written out as POSIX paths. What this asserts is which
+	// directories are consulted and in what order; the separator and the drive
+	// letter are the host's business, and hard-coding them made this fail on
+	// Windows for a reason that had nothing to do with the code.
+	abs := func(t *testing.T, parts ...string) string {
+		t.Helper()
+		p, err := filepath.Abs(filepath.Join(parts...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	exe, home := filepath.Join("/opt", "dash"), filepath.Join("/home", "u", ".skills-dashboard")
+	got := envFileCandidates(exe, home)
+	want := []string{abs(t, exe, ".env"), abs(t, home, ".env")}
 	if !slices.Equal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}

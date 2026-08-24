@@ -255,10 +255,7 @@ func (q LogQueries) PodTraffic(w Window) (Query, error) {
 func (q LogQueries) PodBadStatusSeries(w Window) (Query, error) {
 	preamble, err := q.accessPreamble()
 	if err != nil {
-<<<<<<< HEAD
 		return Query{}, err
-=======
-		return Query{}, fmt.Errorf("statusField: %w", err)
 	}
 	ns, err := q.namespaceFilter()
 	if err != nil {
@@ -270,11 +267,11 @@ func (q LogQueries) PodBadStatusSeries(w Window) (Query, error) {
 	}
 
 	var b strings.Builder
-	b.WriteString("fields @timestamp\n")
+	b.WriteString(preamble)
 	b.WriteString(ns)
 	b.WriteString(probes)
-	fmt.Fprintf(&b, "| filter ispresent(%s) and %s\n", status, notInStatuses(status, q.Format.OKStatuses))
-	fmt.Fprintf(&b, "| stats count() as n by bin(%s) as t, %s as status\n", w.Period, status)
+	fmt.Fprintf(&b, "| filter ispresent(status) and %s\n", notInStatuses("status", q.Format.OKStatuses))
+	fmt.Fprintf(&b, "| stats count() as n by bin(%s) as t, status\n", w.Period)
 	b.WriteString("| sort t asc")
 	return Query{ID: "pod.badStatus.series", Text: b.String()}, nil
 }
@@ -306,14 +303,9 @@ func (q LogQueries) PodBadStatusSeries(w Window) (Query, error) {
 // The window is not a parameter: without bin() nothing here varies with it, and
 // the runner scopes every query to the window when it starts it.
 func (q LogQueries) PodBadStatusByPath() (Query, error) {
-	status, err := q.processedField(q.Format.StatusField)
+	preamble, err := q.accessPreamble()
 	if err != nil {
-		return Query{}, fmt.Errorf("statusField: %w", err)
-	}
-	path, err := q.processedField(q.Format.PathField)
-	if err != nil {
-		return Query{}, fmt.Errorf("pathField: %w", err)
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
+		return Query{}, err
 	}
 	ns, err := q.namespaceFilter()
 	if err != nil {
@@ -328,20 +320,13 @@ func (q LogQueries) PodBadStatusByPath() (Query, error) {
 	b.WriteString(preamble)
 	b.WriteString(ns)
 	b.WriteString(probes)
-<<<<<<< HEAD
 	fmt.Fprintf(&b, "| filter ispresent(status) and %s\n", notInStatuses("status", q.Format.OKStatuses))
-	fmt.Fprintf(&b, "| stats count() as n by bin(%s) as t, status, path\n", w.Period)
-	b.WriteString("| sort t asc")
-	return Query{ID: "pod.badStatus.series", Text: b.String()}, nil
-=======
-	fmt.Fprintf(&b, "| filter ispresent(%s) and %s\n", status, notInStatuses(status, q.Format.OKStatuses))
 	// max(@timestamp) rather than a sort: the caller wants the newest hit per
 	// group, and Insights renders @timestamp fixed-width so the comparison that
 	// picks it needs no parse.
-	fmt.Fprintf(&b, "| stats count() as n, max(@timestamp) as lastTs by %s as status, %s as path\n", status, path)
+	b.WriteString("| stats count() as n, max(@timestamp) as lastTs by status, path\n")
 	b.WriteString("| sort n desc")
 	return Query{ID: "pod.badStatus.byPath", Text: b.String()}, nil
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 }
 
 // PodBadStatusList returns the most recent non-OK responses, newest first.
@@ -443,66 +428,44 @@ func (q LogQueries) PodErrorList(w Window, limit int) (Query, error) {
 func (q LogQueries) levelFilter() (string, error) {
 	var b strings.Builder
 	// Normalise into two buckets so the series has a stable set of keys.
-<<<<<<< HEAD
-	b.WriteString("| fields tolower(rawLevel) as lvl, dashboardMessage as raw\n")
-	b.WriteString("| filter lvl in ['error', 'err', 'fatal', 'panic', 'warn', 'warning']\n")
-	b.WriteString("    or (lvl = '' and not ispresent(status) and raw like /(?i)\\b(error|fatal|panic|warn|warning|oomkilled)\\b/)\n")
-	b.WriteString("| fields if(lvl in ['warn', 'warning'] or (lvl = '' and not ispresent(status) and raw like /(?i)\\b(warn|warning)\\b/), 'warn', 'error') as level\n")
-=======
 	//
 	// The message field is matched in place rather than aliased: PodErrorList
 	// already selects it by name, and Logs Insights refuses to compile a query
 	// that both selects a field and re-aliases it.
 	b.WriteString("| fields tolower(rawLevel) as lvl\n")
 	b.WriteString("| filter lvl in ['error', 'err', 'fatal', 'panic', 'warn', 'warning']\n")
-	fmt.Fprintf(&b, "    or (lvl = '' and %s like /(?i)\\b(error|fatal|panic|warn|warning|oomkilled)\\b/)\n", msg)
-	fmt.Fprintf(&b, "| fields (lvl in ['warn', 'warning'] or (lvl = '' and %s like /(?i)\\b(warn|warning)\\b/)) as isWarn\n", msg)
+	b.WriteString("    or (lvl = '' and not ispresent(status) and dashboardMessage like /(?i)\\b(error|fatal|panic|warn|warning|oomkilled)\\b/)\n")
 	// if(), not a ternary: Logs Insights has no `? :` and fails at the lexer.
-	b.WriteString("| fields if(isWarn, 'warn', 'error') as level\n")
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
+	b.WriteString("| fields if(lvl in ['warn', 'warning'] or (lvl = '' and not ispresent(status) and dashboardMessage like /(?i)\\b(warn|warning)\\b/), 'warn', 'error') as level\n")
 	return b.String(), nil
 }
 
 func (q LogQueries) accessFields() ([]string, error) {
-<<<<<<< HEAD
-	return []string{
-		"kubernetes.pod_name as pod", "app", "method", "path",
-		"requestTarget", "status", "latencyMs", "clientIp",
-	}, nil
-=======
 	// The three fixed ones come from the Kubernetes envelope, not from the
 	// application's own log line, so they are present whatever an operator has
 	// or has not named in the log format. That is what lets the panel offer a
 	// row detail unconditionally instead of only where a User-Agent field
 	// happens to be configured. PodErrorList already selects `container` under
 	// this name.
+	//
+	// The rest are the aliases accessPreamble defines, so they read the same
+	// whether the line arrived as JSON or as a Gin access log.
 	out := []string{
 		"kubernetes.pod_name as pod",
 		"kubernetes.container_name as container",
 		"kubernetes.namespace_name as namespace",
+		"app", "method", "path", "requestTarget", "status", "latencyMs", "clientIp",
 	}
-	for _, spec := range []struct {
-		name, alias string
-	}{
-		{q.Format.AppField, "app"},
-		{q.Format.MethodField, "method"},
-		{q.Format.PathField, "path"},
-		{q.Format.StatusField, "status"},
-		{q.Format.LatencyField, "latencyMs"},
-		{q.Format.ClientIPField, "clientIp"},
-		{q.Format.UserAgentField, "userAgent"},
-	} {
-		if spec.name == "" {
-			continue
-		}
-		f, err := q.processedField(spec.name)
+	// userAgent has no preamble alias: there is no default name to guess, so
+	// it is read straight from the configured field when there is one.
+	if q.Format.UserAgentField != "" {
+		f, err := q.processedField(q.Format.UserAgentField)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("userAgentField: %w", err)
 		}
-		out = append(out, fmt.Sprintf("%s as %s", f, spec.alias))
+		out = append(out, fmt.Sprintf("%s as userAgent", f))
 	}
 	return out, nil
->>>>>>> 886c64a3eb9e04282a92f5ca93b0ca31debef02e
 }
 
 // notInStatuses renders the healthy-code exclusion. An empty set means every
