@@ -1,36 +1,39 @@
 # skills-dashboard
 
-EKS 워크로드를 로컬에서 관찰하는 단일 바이너리 대시보드입니다. 팟 로그, WAF 로그, 타겟 그룹 지표, 팟·노드 리소스와 개수, 팟 상태, RDS Proxy 커넥션을 **하나의 시간축** 위에 모읍니다.
+> 2026년 전국기능경기대회 3과제로 만든 대시보드입니다. 대회가 끝나 **보관 상태**이고, 기능 추가는 하지 않습니다.
 
-데이터는 전부 **AWS CloudWatch**에서 옵니다. Kubernetes API에도 Prometheus에도 접근하지 않으며, 액세스 키 하나로 동작합니다. 예외는 하나, 트래픽 점검 화면뿐입니다 — 아래 [트래픽 점검](#트래픽-점검) 참고.
+EKS 워크로드를 로컬에서 관찰하는 대시보드입니다. 팟 로그, WAF 로그, 타겟 그룹 지표, 팟·노드 리소스와 개수, 팟 상태, RDS Proxy 커넥션을 **하나의 시간축** 위에 모읍니다.
+
+데이터는 전부 **AWS CloudWatch** 에서 옵니다. Kubernetes API에도 Prometheus에도 접근하지 않으며, 액세스 키 하나로 동작합니다. 예외는 하나, 트래픽 점검 화면뿐입니다.
+
+![개요](docs/screenshots/overview.png)
+
+## 화면
+
+| 화면 | 답하는 질문 |
+| --- | --- |
+| [개요](docs/screenshots/overview.png) | 지금 이 클러스터는 괜찮은가 — 응답 시간·비정상 응답·타겟 그룹·팟 개수·WAF 를 한 화면에 |
+| [팟 로그](docs/screenshots/pod-logs.png) | 어느 앱이 느리고 어느 경로가 실패하는가 |
+| [WAF](docs/screenshots/waf.png) | 무엇이 들어왔고 무엇이 막혔는가 — 경로·메소드·헤더를 action 단위로 |
+| [트래픽 점검](docs/screenshots/check.png) | **지금** 응답하는가 — 대시보드가 직접 GET 을 한 번 보낸다 |
+| [타겟 그룹](docs/screenshots/targetgroup.png) | ALB 가 보는 응답 시간과 5xx |
+| [팟·노드](docs/screenshots/kubernetes.png) | CPU·메모리와 개수, 팟 상태 |
+| [RDS Proxy](docs/screenshots/database.png) | 커넥션이 포화됐는가 |
+| [설정](docs/screenshots/settings.png) | 무엇을 모니터링할지, 로그를 어떻게 파싱할지 |
+
+화면마다의 규칙과 알려진 한계는 [`docs/behavior.md`](docs/behavior.md) 에 있습니다.
+
+## 실행
 
 ```bash
-cp .env.example .env    # 액세스 키 입력 — 저장소 루트에 둡니다
-node start.mjs          # http://127.0.0.1:8080
+mise install                                    # go 1.26.5 + node 24
+npm run install:server && mise run node:build   # node 엔진
+mise run build                                  # Go 엔진 → bin/
+cp .env.example .env                            # 액세스 키
+node start.mjs                                  # http://127.0.0.1:8080
 ```
 
 `npm start` 도 같습니다. 인자를 줄 때는 `npm start -- --port 9000` 처럼 `--` 를 끼웁니다.
-
-**설치도 빌드도 없습니다.** `node_modules` 가 없어도 되고 `npm install` 을 돌릴 필요도 없습니다. `git clone` 한 다음 위 두 줄이 전부입니다. Go 툴체인이 없는 곳에서도 동작하는 것이 요점입니다 — 실행할 것은 저장소에 함께 커밋되어 있고, 웹 UI는 그 안에 들어 있습니다.
-
-### 엔진이 둘입니다
-
-같은 대시보드를 띄우는 방법이 두 가지 있고, `start.mjs` 가 무엇을 띄울지 고릅니다.
-
-| 엔진 | 실체 | 비고 |
-| --- | --- | --- |
-| `node` | `server/dist/skills-dashboard.mjs` | TypeScript 백엔드를 esbuild 로 묶은 파일 하나. 실행 파일이 없으므로 차단당할 대상도 없습니다 |
-| `binary` | `bin/skills-dashboard-<플랫폼>` | Go 백엔드. 6,600줄의 Go 테스트가 지키고 있습니다 |
-
-```bash
-node start.mjs                                  # 번들이 있으면 node, 없으면 binary
-SKILLS_DASHBOARD_ENGINE=binary node start.mjs   # exe 로 고정
-SKILLS_DASHBOARD_ENGINE=node   node start.mjs   # 번들로 고정
-```
-
-**서명 없는 exe 를 Defender 나 SmartScreen 이 막으면 `SKILLS_DASHBOARD_ENGINE=node` 로 넘어가세요.** 두 엔진이 있는 이유가 그것입니다. 로그도 응답도 같으므로 이 문서의 나머지는 어느 쪽에서든 그대로 읽힙니다.
-
-`start.mjs` 가 하는 일은 띄울 것을 찾아 실행하는 것뿐입니다. 포트 폴백(8080 이 막히면 8085 까지), 브라우저 자동 실행, 종료 처리는 엔진이 스스로 합니다. 준 인자는 그대로 넘어갑니다.
 
 | 플래그 | 기본값 | 뜻 |
 | --- | --- | --- |
@@ -40,76 +43,59 @@ SKILLS_DASHBOARD_ENGINE=node   node start.mjs   # 번들로 고정
 | `--verbose` | `false` | debug 로그 |
 | `--env` | — | 다른 `.env` 를 쓸 때. 준 경로가 없으면 실행이 실패합니다 |
 
-### 액세스 키를 어디에 두나
+### 액세스 키
 
-두 가지 방법이 있고, **설정 화면에서 저장한 키가 `.env` 를 이깁니다.**
+두 곳에서 읽고, **설정 화면에서 저장한 키가 `.env` 를 이깁니다.**
 
-설정 화면에 키를 입력하고 저장하면 AWS 에 한 번 물어본 뒤, 통과할 때만 `~/.skills-dashboard/credentials.json`(권한 0600)에 기록합니다. 재시작 없이 바로 적용됩니다. 화면에 `저장된 키 지우기` 가 있고, 지우면 `.env` 로 되돌아갑니다.
+설정 화면에 키를 넣고 저장하면 AWS 에 한 번 물어본 뒤 통과할 때만 `~/.skills-dashboard/credentials.json`(0600)에 기록하고, 재시작 없이 적용됩니다. `저장된 키 지우기` 로 `.env` 로 되돌아갑니다. 지금 어느 쪽으로 돌고 있는지는 설정 화면의 자격증명 카드가 말합니다.
 
-`.env` 는 저장된 키가 없을 때 읽습니다. 바이너리 자체는 **실행 파일과 같은 폴더**를 먼저, 없으면 `~/.skills-dashboard/`(`config.json` 이 있는 곳)를 봅니다. 현재 작업 디렉터리는 보지 않습니다 — 어디서 실행했느냐에 따라 읽는 키가 달라지지 않게 하기 위해서입니다.
+엔진은 `.env` 를 **실행 파일과 같은 폴더**에서 먼저, 없으면 `~/.skills-dashboard/` 에서 찾습니다. 현재 작업 디렉터리는 보지 않습니다 — 어디서 실행했느냐로 읽는 키가 달라지지 않게 하기 위해서입니다. `start.mjs` 가 `--env <저장소 루트>/.env` 를 대신 넘겨 주므로, 런처로 실행하는 한 `.env` 는 저장소 루트에 두면 됩니다.
 
-그래서 `bin/` 안의 실행 파일을 직접 띄우면 저장소 루트의 `.env` 가 무시됩니다. `start.mjs` 가 `--env <저장소 루트>/.env` 를 대신 넘겨 주므로, **런처로 실행하는 한 `.env` 는 저장소 루트에 두면 됩니다.** 파일이 없으면 무엇을 해야 하는지 알려 주고 그대로 실행합니다 — 자격증명 없이도 대시보드는 뜨고, 설정 화면이 나머지를 설명합니다.
+`.env` 도 `credentials.json` 도 clone 에 딸려 오지 않습니다.
 
-지금 둘 중 어느 쪽으로 돌고 있는지는 설정 화면의 자격증명 카드가 말합니다. `.env` 를 고쳤는데 반영되지 않는다면 저장된 키가 이기고 있는 것입니다.
+## 엔진이 둘입니다
 
-`.env` 와 `credentials.json` 둘 다 clone 에 딸려 오지 않습니다. 액세스 키는 따로 옮기세요.
+같은 대시보드를 띄우는 백엔드가 두 벌이고, `start.mjs` 가 무엇을 띄울지 고릅니다.
 
-### 프로세스가 남았을 때
+| 엔진 | 실체 | 비고 |
+| --- | --- | --- |
+| `node` | `server/dist/skills-dashboard.mjs` | TypeScript 백엔드를 esbuild 로 묶은 파일 하나. **대회 당일 실제로 돌린 것** |
+| `binary` | `bin/skills-dashboard-<플랫폼>` | Go 백엔드. 6,900줄의 Go 테스트가 지키고 있습니다 |
 
-Ctrl+C 로 내리면 깨끗이 끝납니다. 콘솔 창을 강제로 닫는 등으로 런처가 자식을 정리하지 못한 경우에는 포트를 붙든 채 남을 수 있습니다.
-
-```powershell
-Get-Process skills-dashboard* | Stop-Process -Force   # Windows
-pkill -f skills-dashboard                             # Linux
+```bash
+node start.mjs                                  # 번들이 있으면 node, 없으면 binary
+SKILLS_DASHBOARD_ENGINE=binary node start.mjs   # 실행 파일로 고정
+SKILLS_DASHBOARD_ENGINE=node   node start.mjs   # 번들로 고정
 ```
 
-방치하면 다음 실행이 조용히 8081 로 옮겨 가고, 8080 을 열어 본 사람은 옛 빌드를 보게 됩니다.
+두 번째 엔진이 있는 이유는 하나입니다. **대회장에서 실행이 허용된 목록에 Go 가 없었고, node 는 있었습니다.**
 
----
+Go 툴체인도 없었으므로 Go 쪽은 실행 파일을 미리 만들어 커밋해 가져가는 수밖에 없었는데, 그렇게 가져간 exe 를 현장에서 띄울 수 있다는 보장이 없었고 막히면 되돌릴 방법도 없었습니다. clone 안의 실행 파일 하나에 전부를 걸고 있었던 셈입니다. 그래서 백엔드 8,000줄을 TypeScript 로 이식해 **허용된 런타임 위에서 도는** 두 번째 트랙을 만들었고, 대회 당일 실제로 돌린 것은 이쪽입니다. 당시의 판단은 [`NOTES.md`](NOTES.md) 의 2026-08-24 두 항목에 있습니다.
 
-## 설계상의 세 가지 결정
+로직이 두 벌이라 갈라질 수 있으므로 `mise run parity` 가 두 엔진을 각각 띄우고 같은 요청을 던져 응답을 **바이트 단위로** 비교합니다. 한쪽만 고치면 여기서 걸립니다.
 
-이 저장소는 재작성입니다. 이전 구현이 겪은 세 가지 문제가 아키텍처를 결정했습니다.
+```
+일치 35 · 미구현 0 · 불일치 0
+```
 
-### 1. 로그가 쌓여도 느려지지 않는다 — 로컬 적재를 하지 않음
+대회 당일 돌린 바이너리와 번들은 커밋되어 있었고, 지금은 히스토리에만 남아 있습니다.
 
-이전 구현은 `FilterLogEvents`로 로그 전량을 로컬 SQLite에 적재하고 로컬 SQL로 집계했습니다. 백분위 계산이 인덱스 없는 컬럼에 `ORDER BY … OFFSET`을 걸었고, WAF 헤더 통계는 무인덱스 크로스 조인이었으며, 커넥션은 하나뿐이라 수집기와 조회가 직렬화됐습니다. 데이터가 늘수록 느려지는 것이 필연이었습니다.
+```bash
+git show 8eef79f:bin/skills-dashboard-linux-x64 > skills-dashboard   # 12,939,426 바이트
+git show 8eef79f:server/dist/skills-dashboard.mjs > bundle.mjs
+```
 
-여기서는 **집계를 CloudWatch Logs Insights로 내립니다.** 로컬에 누적되는 상태가 없으므로 시간이 지나도 비용이 일정합니다. 조회 상한 4시간이 스캔량을 구조적으로 묶습니다.
+## 설계
 
-대가는 AWS 비용입니다. Insights는 스캔 바이트당 과금이므로 자동 새로고침은 기본 1분, 최소 30초, 결과는 30초 캐시이며, **각 패널이 스캔량을 표시합니다.**
+이 저장소는 재작성입니다. 이전 구현이 겪은 세 가지 문제가 아키텍처를 결정했습니다. 각각의 맥락과 기각된 대안은 [`NOTES.md`](NOTES.md) 의 결정 로그에 있습니다.
 
-### 2. 오버뷰와 상세가 같은 값을 낸다 — 프론트는 계산하지 않음
-
-이전 구현은 표시값을 프론트에서 재집계했습니다. 그래서 "요청 수"가 두 곳에서 서로 다른 모집단을 세고, 잘린 목록의 길이가 합계로 표시되고, 같은 패널이 그리드에서 8행·확대에서 30행을 보여 분모까지 달라졌습니다.
-
-여기서는 계약으로 막습니다.
-
-- 화면에 뜨는 모든 숫자는 백엔드 `stats`에서 옵니다. 프론트는 포맷팅만 합니다.
-- `table.total`은 `rows`와 **독립적으로** 계산됩니다. 목록은 잘려도 건수는 잘리지 않습니다.
-- 각 `stat`은 `basis`로 **무엇을 센 것인지** 밝힙니다. 모집단이 다른 두 숫자는 라벨에서 구분됩니다.
-- 한 페이지는 요청 하나로 오고, 모든 패널이 **하나의 `window`** 를 공유합니다.
-- 단일 패널 엔드포인트와 페이지 엔드포인트는 **같은 빌더**를 씁니다. 두 경로가 바이트 단위로 같은 결과를 내는지 테스트가 확인합니다.
-
-### 3. 오래 켜둬도 죽지 않는다
-
-이전 구현이 결국 데이터를 못 불러오게 된 경로들을 하나씩 막았습니다.
-
-| 이전 | 지금 |
-|---|---|
-| `ListMetrics` 차원이 단조 증가해 `GetMetricData` 500쿼리 상한 초과 → 영구 실패 | `SEARCH()` 메트릭 수식으로 `ListMetrics` 경로 자체를 제거. 상한은 코드로 강제(청크 분할) |
-| 응답을 배열 인덱스로 매칭, 파싱 에러 무시 → 패닉 | 쿼리 ID 맵으로 매칭. 알 수 없는 ID는 에러 |
-| Insights 미사용, `FilterLogEvents` 무한 페이징 | 쿼리별 데드라인, 동시 실행 세마포어, 취소 시 `StopQuery` |
-| 캐시가 락을 먼저 풀어 스탬피드, 실패는 캐시 안 함 | single-flight, 실패도 짧게 캐시 |
-| `http.ListenAndServe`, 타임아웃 전무 | 읽기·쓰기·유휴 타임아웃 명시 |
-| 호출마다 새 `http.Transport` → FD 누수 | 클라이언트 1회 생성 후 재사용 |
-| `recover` 없음 → 패닉이 프로세스를 종료 | 핸들러 패닉은 응답 하나로 격리 |
-
----
+- **로그가 쌓여도 느려지지 않는다.** 로컬 SQLite 적재를 버리고 집계를 CloudWatch Logs Insights 로 내렸습니다. 로컬에 누적되는 상태가 없으므로 시간이 지나도 비용이 일정합니다. 대가는 스캔 바이트당 과금이고, 그래서 **각 패널이 스캔량을 표시합니다.**
+- **오버뷰와 상세가 같은 값을 낸다.** 화면에 뜨는 모든 숫자는 백엔드 `stats` 에서 오고 프론트는 포맷팅만 합니다. `table.total` 은 `rows` 와 독립적으로 계산되어 목록이 잘려도 건수는 잘리지 않고, 각 `stat` 은 `basis` 로 무엇을 센 것인지 밝힙니다.
+- **오래 켜둬도 죽지 않는다.** `ListMetrics` 를 `SEARCH()` 수식으로 대체해 쿼리 수 상한 초과를 구조적으로 없앴고, 쿼리별 데드라인·동시 실행 세마포어·single-flight 캐시·핸들러 패닉 격리를 넣었습니다.
 
 ## 개발
 
-툴체인은 mise가 관리합니다. 패키지 매니저는 npm 하나입니다.
+툴체인은 mise 가 관리합니다. 패키지 매니저는 npm 하나입니다.
 
 ```bash
 mise install            # go 1.26.5 + node 24
@@ -117,67 +103,21 @@ npm run install:web     # web/node_modules
 npm run install:server  # server/node_modules (esbuild · aws-sdk · hono)
 mise run test           # go test ./... + vitest
 mise run test:e2e       # playwright 레이아웃 검증
+mise run lint           # go vet + prettier + eslint
 mise run build          # bin/skills-dashboard-{win32-x64.exe,linux-x64}
 mise run node:build     # server/dist/skills-dashboard.mjs
 mise run parity         # 두 엔진의 응답을 엔드포인트마다 대조
-```
-
-개발 중에는 Vite와 API를 함께 띄웁니다.
-
-```bash
 npm run dev             # :5173 (UI) + :8080 (API), /api 를 프록시
 ```
 
-따로 띄우고 싶으면 `mise run go:run` 과 `mise run web:dev` 를 각각 씁니다.
-
-### 두 엔진이 같은 답을 내는지
-
-`mise run parity` 가 두 엔진을 각각 띄우고 같은 요청을 던져 응답을 비교합니다. 이식이 옳은지 확인할 수단이 이것뿐입니다 — 한쪽만 고치면 여기서 걸립니다.
-
-```
-일치 35 · 미구현 0 · 불일치 0
-```
-
-시각처럼 호출마다 달라지는 값과, 실행 파일 옆의 `.env` 를 찾는 경로는 비교에서 뺍니다. 뒤의 것은 엔진마다 다른 자리에 있는 것이 맞습니다.
-
-자격증명이 없으면 AWS 를 쓰는 엔드포인트는 양쪽 다 503 을 냅니다. 그 상태의 일치는 "둘이 똑같이 거절한다" 까지만 말합니다. **실제 계정에 대한 대조는 아직 하지 않았습니다.**
-
-### 바이너리와 번들을 다시 만들었을 때
-
-`bin/` 의 실행 파일은 커밋합니다. 대회장에는 Go 툴체인이 없어 거기서 만들 수 없기 때문입니다.
-
-git 은 바이너리를 델타 압축하지 못하므로, 다시 커밋할 때마다 히스토리에 12.6MB × 2 가 영구히 쌓입니다. **소스를 고칠 때마다 커밋하지 말고** 마일스톤과 대회 전날에만 갱신하세요. 대신 `bin/BUILD.txt` 에 어느 커밋에서 만들었는지 적혀 있으니, 낡은 바이너리를 돌리고 있는지는 그 파일로 확인합니다.
-
-```bash
-mise run build          # bin/  — Go 툴체인 필요
-mise run node:build     # server/dist/  — node 만 있으면 됩니다
-git rev-parse --short HEAD    # BUILD.txt 의 commit 과 대조
-```
-
-번들도 같은 이유로 커밋합니다(약 3.7MB). 텍스트라 델타가 조금은 먹지만, 규율은 같습니다 — 마일스톤에만 갱신하고 출처는 `server/dist/BUILD.txt` 가 적습니다.
-
-### 대회장 환경 재현
-
-가장 값진 검증입니다. PATH 에서 go 와 mise 를 빼고 node 만 남긴 채, 별도 clone 에서 돌립니다.
-
-```powershell
-pwsh -NoProfile
-$env:PATH = "$(Split-Path (mise which node));C:\Windows\System32;C:\Windows"
-git clone <this repo> $env:TEMP\rehearsal
-cd $env:TEMP\rehearsal
-node start.mjs
-```
-
-`node_modules` 가 없는 상태에서 대시보드가 떠야 합니다. **엔진을 바꿔 두 번 하세요** — `SKILLS_DASHBOARD_ENGINE=node` 와 `=binary` 각각으로 뜨는지 봐야, 현장에서 한쪽이 막혔을 때 다른 쪽으로 넘어갈 수 있다는 것이 확인됩니다. `.env` 를 넣었다면 로그의 `found a .env envFile=...` 이 **clone 루트**를 가리키는지 확인하세요 — `bin\.env` 를 가리키면 `--env` 전달이 동작하지 않은 것입니다.
+`bin/` 과 `server/dist/` 는 빌드 산출물이며 커밋하지 않습니다. SPA 는 한 번만 빌드해 두 엔진이 나눠 씁니다 — `mise run web:build` 가 `internal/web/dist` 에 쓰고, Go 는 그것을 `//go:embed` 로, node 는 번들 시점에 base64 로 인라인합니다.
 
 ### 구조
 
 ```
 start.mjs                 런처 — 엔진을 고르고 띄운다. 의존성 없음
 scripts/launcher.mjs      엔진 선택과 .env 전달. start.mjs 와 dev.mjs 가 공유
-scripts/dev.mjs           개발용 — Vite 와 API 를 함께 띄운다
 scripts/parity.mjs        두 엔진의 응답 대조
-bin/                      커밋된 Go 실행 파일
 
 cmd/skills-dashboard/     진입점, http.Server
 internal/domain/          순수 로직 — 윈도, 쿼리 빌더, 응답 계약, 메트릭 카탈로그
@@ -186,145 +126,28 @@ internal/config/          자격증명(.env·저장된 키), 리소스 선택 �
 internal/api/             HTTP 핸들러와 패널 빌더
 internal/web/             embed.FS + SPA 폴백
 
-server/dist/              커밋된 node 번들
 server/src/domain/        internal/domain 의 이식
 server/src/aws/           internal/awsx 의 이식
 server/src/config/        internal/config 의 이식
 server/src/http/          internal/api 의 이식
-server/src/web/           SPA 를 번들에 인라인 (embed.go 대응)
 server/src/contract.ts    web/src/lib/types.ts 를 서버 타입으로 재사용
 
 web/                      SvelteKit (SSR 없음), uPlot + layerchart
 ```
 
-`internal/awsx/iface.go`의 좁은 인터페이스가 테스트 경계입니다. 모든 AWS 호출은 여기를 지나므로 실제 AWS 없이 전 경로를 검증할 수 있습니다.
+`internal/awsx/iface.go` 의 좁은 인터페이스가 테스트 경계입니다. 모든 AWS 호출이 여기를 지나므로 실제 AWS 없이 전 경로를 검증할 수 있습니다.
 
-node 쪽에는 그에 해당하는 테스트가 아직 없습니다. 대신 `web/src/lib/types.ts` 를 그대로 구현 타입으로 쓰므로 와이어 계약 위반은 컴파일에서 걸리고, 나머지는 `mise run parity` 가 봅니다.
+node 쪽에는 그에 해당하는 단위 테스트가 없습니다. 대신 `web/src/lib/types.ts` 를 그대로 구현 타입으로 쓰므로 와이어 계약 위반은 컴파일에서 걸리고, 나머지는 `mise run parity` 가 봅니다.
 
-SPA 는 한 번만 빌드해 두 엔진이 나눠 씁니다. `mise run web:build` 가 `internal/web/dist` 에 쓰고, Go 는 그것을 `//go:embed` 로, node 는 번들 시점에 base64 로 인라인합니다.
+## 문서
 
----
+| 파일 | 내용 |
+| --- | --- |
+| [`docs/behavior.md`](docs/behavior.md) | 무엇을 어떻게 세는가 — 조회 기간, WAF, 트래픽 점검, 로그 형식, 리전, 알려진 한계 |
+| [`NOTES.md`](NOTES.md) | 왜 그렇게 만들었는가 — 날짜별 결정 로그(맥락·채택·기각·대가·검증) |
+| [`web/README.md`](web/README.md) | 프론트엔드 |
 
-## 조회 기간
-
-**최대 4시간**입니다. 15m / 30m / 1h / 2h / 4h 중에서 고르고, 간격은 1m / 5m / 10m / 1h 중 버킷 수가 4~250개가 되는 조합만 열립니다. 서버가 검증하고, UI도 유효한 조합만 제시합니다.
-
-윈도의 끝은 간격 경계로 내림되므로 **모든 버킷이 완전한 버킷**입니다. 진행 중인 미완성 버킷은 들어오지 않습니다.
-
----
-
-## WAF 화면
-
-WAF 로그는 **action 단위로** 읽습니다. "이 경로에 4,000건"은 그중 몇 건이 애플리케이션에 도달했는지 말해 주지 않으므로, 경로·메소드·헤더 통계는 전부 허용 / 차단 / 기타와 **마지막 처리**를 함께 보여줍니다. 집계 자체가 action 별로 나뉘어 오고, 표는 그것을 키 하나로 접어 보여줄 뿐입니다 — 스캔 횟수는 늘지 않습니다.
-
-`WAF 트래픽` 패널에는 개별 요청 목록이 붙습니다. 차단된 요청만 나열하면 빈 목록이 "아무것도 차단되지 않았다"인지 "아무것도 들어오지 않았다"인지 구분되지 않기 때문에, 이 목록은 action 으로 거르지 않습니다. 목록은 상한에서 잘리지만 **옆의 건수는 잘리지 않습니다** — 그 숫자는 목록이 아니라 action 시계열 합계에서 옵니다.
-
-## 트래픽 점검
-
-`트래픽 점검` 화면은 설정된 주소로 대시보드가 **직접 GET 요청을 한 번** 보내고 상태 코드와 소요 시간을 보여줍니다. 나머지 화면이 읽는 CloudWatch 지표는 몇 분 늦고, 값이 비었을 때 "트래픽이 없었다"와 "게시되지 않았다"를 구분해 주지 않습니다. 지금 응답하는지는 물어봐야 알 수 있습니다.
-
-경계는 좁게 잡혀 있습니다.
-
-- **누를 때만 나갑니다.** 상단 바에 상태 배지를 두지 않은 이유가 이것입니다 — 배지는 매 페이지 로드마다 요청을 쏘게 되고, 그건 아무도 요청하지 않은 트래픽입니다. 화면 안의 반복 주기는 기본 꺼짐입니다.
-- 주소는 `http` / `https` 만 허용하며, 설정 저장 시 거부하고 로드 시에는 그 값만 비웁니다. 다른 설정값과 같은 규칙입니다.
-- 응답 **본문은 읽고 버립니다.** 저장하지도 표시하지도 않습니다.
-- 결과 이력은 메모리에만 최근 20회 남습니다. 새로고침하면 사라집니다. 보존하기 시작하면 이건 버튼이 아니라 모니터링 시스템이 됩니다.
-
-정상 판정 기준은 기본이 2xx이고, 인증이 걸려 401이 정상인 엔드포인트처럼 특정 코드 하나만 정상으로 봐야 하는 경우 설정에서 그 코드를 지정합니다. 화면은 무엇과 비교했는지를 결과 옆에 함께 표시합니다.
-
-## 패널 확대
-
-각 패널의 제목 옆 버튼이 같은 패널을 크게 엽니다. 네이티브 `<dialog>` 의 `showModal()` 이라 ESC와 배경 클릭으로 닫히고, 여는 동안 배경은 비활성화됩니다.
-
-카드와 모달은 **같은 스니펫 하나**를 렌더하며 인자는 차트 높이뿐입니다. 이전 구현은 그리드에서 막대 8개, 확대 다이얼로그에서 30개를 보여 주고 막대 눈금을 화면에 있는 것에서 계산했기 때문에 같은 패널이 두 곳에서 다르게 읽혔습니다. 코드 경로가 하나뿐이면 그 일이 일어날 자리가 없습니다.
-
-열려 있는 동안 자동 새로고침은 **그대로 돕니다.** 갱신을 멈추는 모달은 낡은 숫자를 낡았다는 말 없이 읽게 하는 모달입니다.
-
-## 리전과 모니터링 대상
-
-리전은 두 개입니다. 작업 리전은 자격증명의 `AWS_REGION` 이, WAF 리전은 `~/.skills-dashboard/config.json` 의 `wafRegion`(기본 `us-east-1`)이 정합니다.
-
-작업 리전은 설정 화면에서 키와 함께 바꿀 수 있고, 저장하면 재시작 없이 반영됩니다. WAF 리전은 아직 `config.json` 을 직접 고친 뒤 재시작해야 합니다.
-
-### WAF 로그 그룹은 버지니아에 있습니다
-
-CLOUDFRONT 스코프 웹 ACL은 배포가 어디서 트래픽을 받든 **us-east-1 에만** 로그와 메트릭을 남깁니다. 그래서 WAF 패널의 Logs Insights 쿼리와 로그 그룹 자동 조회는 작업 리전이 아니라 WAF 리전 클라이언트를 씁니다. 설정 화면의 WAF `자동 조회` 도 그 리전의 `aws-waf-logs-*` 그룹만 보여 줍니다.
-
-### 설정 파일이 잘못돼도 시작은 합니다
-
-설정은 `~/.skills-dashboard/config.json` 에 저장됩니다. 이 파일 **내용** 때문에 실행이 막히는 일은 없습니다.
-
-- 저장된 값 중 지금 규칙으로 쓸 수 없는 것(예전 버전이 받아준 로드 밸런서 이름 등)은 **그 값만 비우고** 나머지 설정으로 뜹니다. 무엇을 왜 비웠는지는 로그와 설정 화면 상단에 뜹니다.
-- JSON 자체가 깨져 읽히지 않으면 기본값으로 시작하고, 원본은 `config.json.bak` 으로 옮겨 둡니다.
-- 반대로 **설정 화면에서의 저장은 엄격합니다.** 잘못된 값은 이유와 함께 거절합니다 — 사람이 보고 있는 순간이라 거절이 곧 피드백이고, 방금 입력한 값을 조용히 버리는 편이 더 나쁩니다.
-
-기본 포트 8080이 사용 중이면 8081부터 차례로 잡고 어느 포트로 떴는지 로그에 남깁니다. `--port` 로 직접 지정한 경우에는 그 포트를 존중하고, 열 수 없으면 이유를 말하고 종료합니다. 탐색기에서 더블클릭해 띄운 경우에는 종료 전에 이유를 띄우고 엔터를 기다리므로 창이 그냥 사라지지 않습니다.
-
-### 로드 밸런서는 ARN이 아니라 차원 값입니다
-
-`loadBalancer` 에 들어가는 값은 CloudWatch 의 `LoadBalancer` 차원, 즉 ARN 의 뒤쪽 경로입니다.
-
-```
-arn:aws:elasticloadbalancing:ap-northeast-2:123:loadbalancer/app/my-alb/50dc6c495c0c9188
-                                                             └──────── 이 부분 ────────┘
-```
-
-`자동 조회` 로 고르면 이 형태로 채워지고, 전체 ARN을 붙여넣어도 저장할 때 변환합니다. 변환으로도 살릴 수 없는 값(로드 밸런서 **이름**만 넣는 등)은 저장이 거부됩니다 — 메트릭 SEARCH 는 `:` 와 `/` 를 허용하므로 잘못된 값도 통과한 뒤 아무것도 매칭하지 않고, 그러면 "트래픽이 없는 로드 밸런서" 와 구분되지 않는 빈 차트가 나오기 때문입니다.
-
----
-
-## 로그 형식
-
-Container Insights / fluent-bit 봉투를 읽습니다.
-기본 preset은 JSON과 Gin access log를 자동으로 구분합니다.
-
-JSON 라인은 `log_processed`의 파싱 결과를 먼저 씁니다.
-Gin 라인은 아래 기본 형식을 읽습니다.
-
-```text
-[GIN] 2026/08/21 - 11:00:00 | 200 | 1.25ms | 10.0.4.18 | GET "/v1/user?id=7"
-```
-
-Gin의 `ns`, `µs`, `ms`, `s`, `m`, `h`를 모두 `ms`로 변환합니다.
-앱 이름은 `kubernetes.container_name`에서 가져옵니다.
-따라서 `user`, `stress`, `product`를 따로 집계합니다.
-
-요청 목록에는 query string을 포함한 대상을 표시합니다.
-경로 집계와 제외 규칙에는 query string을 뺀 path를 씁니다.
-
-설정 화면에서 `자동 인식`, `Gin`, `JSON`을 고를 수 있습니다.
-이전 버전의 로그 파싱 규칙은 처음 읽을 때 폐기합니다.
-AWS 리소스 선택과 조회 제한은 그대로 보존합니다.
-
-필드명은 전부 설정값입니다. 설정 화면에 **실제 로그 한 줄을 붙여넣어 파싱 결과를 미리 확인**한 뒤 저장할 수 있습니다. 필드명이 틀렸을 때 패널이 조용히 비는 대신 그 자리에서 드러납니다.
-
-팟 로그 화면에서 namespace 범위를 바꿀 수 있습니다.
-설정값, 전체 namespace, 직접 입력 중 하나를 선택합니다.
-선택값은 URL에 남으므로 같은 범위로 다시 열 수 있습니다.
-
-### 헬스체크 제외
-
-`/health`, `/healthcheck` 로 들어오는 요청은 기본으로 팟 로그 집계에서 제외됩니다. 몇 초마다 도는 프로브는 보통 요청 라인의 최대 공급원이고, 아무 일도 하지 않는 경로 쪽으로 응답 시간 백분위를 끌어내립니다. 프로브가 실패하기 시작하면 같은 행 수천 개가 비정상 응답 표를 채워 진짜 장애를 조회 상한 밖으로 밀어냅니다.
-
-제외는 **집계 전에** 적용합니다.
-응답 시간과 요청 수, 비정상 응답 건수에서 모두 빠집니다.
-각 값의 설명에는 `/health · /healthcheck 제외`를 표시합니다.
-
-Logs Insights는 선택한 시간 범위의 로그를 기준으로 과금합니다.
-일반 `filter`만으로 스캔량이 줄어들지는 않습니다.
-
-경로는 설정에서 바꿀 수 있습니다. **정확히 일치**하는 경로만 제외되며(접두어 규칙은 `/healthy-users` 같은 걸 함께 삼킵니다), 목록을 비우면 아무것도 제외하지 않습니다.
-
----
-
-## 알려진 한계
-
-- **팟의 최소·최대 개수**는 AWS API만으로 얻을 수 없습니다. CloudWatch는 HPA의 설정값을 게시하지 않으므로 조회 구간 내 **관측값**을 쓰며, UI가 그렇게 명시합니다. 노드의 최소·최대는 EKS 노드그룹 `scalingConfig`에서 가져오며 매 요청마다 갱신합니다.
-- **팟 상태 패널은 확장 관찰성을 요구합니다.** `pod_status_running` / `pod_status_pending` / `pod_status_failed` 는 Container Insights **확장 관찰성**(`amazon-cloudwatch-observability` 애드온)에서만 게시됩니다. 구버전 에이전트를 쓰는 클러스터에서는 이 셋이 비고 컨테이너 재시작만 남으며, 패널이 그 이유를 경고로 띄웁니다.
-- **OOMKilled 지표는 읽지 않습니다.** 확장 관찰성에는 `pod_container_status_terminated_reason_oom_killed` 가 있지만 사건이 일어난 뒤에만 나타납니다. CrashLoop은 컨테이너 재시작 증가로, OOM은 팟 로그의 `OOMKilled` 패턴으로 보완하며 완전하지 않음을 UI에 표시합니다.
-- **Container Insights가 꺼져 있으면** 팟·노드 관련 패널이 빕니다. 그럴 때는 빈 화면 대신 안내를 띄웁니다.
-- **WAF 로그 기반 값과 CloudWatch 메트릭 값은 정확히 일치하지 않습니다.** 로그 전달이 메트릭보다 몇 분 늦기 때문이며, 각 값이 자신의 출처를 표시합니다.
-- **웹 ACL 선택은 스코프를 기억하지 않습니다.** 설정에는 ACL 이름만 저장되므로, WAF 리전이 작업 리전과 다를 때 WAF 메트릭 패널은 선택된 ACL을 전부 WAF 리전에서 읽습니다. REGIONAL 스코프 ACL은 작업 리전에 메트릭을 게시하므로 두 스코프를 섞어 고르면 REGIONAL 쪽이 빕니다. 한쪽 스코프만 쓰는 경우에는 문제가 없습니다.
+`docs/screenshots/` 의 그림은 e2e 픽스처로 찍은 것이라 AWS 계정이 필요 없습니다. 다시 찍으려면 `SHOTS=1 npm --prefix web run test:e2e -- shots` — 리눅스에서는 폰트를 먼저 잡아야 합니다(`web/e2e/shots.e2e.ts` 주석 참고).
 
 ## 라이선스
 
