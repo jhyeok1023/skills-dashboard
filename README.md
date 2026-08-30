@@ -157,16 +157,5 @@ node 쪽에는 그에 해당하는 단위 테스트가 없습니다. 대신 `web
 
 This project is licensed under the [BSD 3-Clause License](LICENSE).
 
-### 서드파티
-
-두 엔진은 서드파티를 산출물 **안에** 넣습니다. Go 는 `aws-sdk-go-v2` 를 정적 링크하고,
-esbuild 는 의존성을 전부 인라인하며, SPA 는 양쪽에 임베드됩니다. Apache-2.0 과 MIT 은
-그렇게 배포할 때 라이선스 사본과 저작권 고지를 함께 주라고 요구합니다.
-
-산출물에 실제로 들어가는 것들의 고지는 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)
-에 있습니다. **`bin/` 이나 `server/dist/` 의 산출물을 남에게 넘길 때는 `LICENSE` 와 이 파일을
-함께 넘기세요** — 빌드가 두 파일을 산출물 옆에 복사해 둡니다.
-
-목록은 선언된 의존성이 아니라 빌드가 남긴 사실에서 옵니다. Go 는 컴파일 그래프,
-node 는 esbuild metafile, SPA 는 rolldown 이 번들한 모듈입니다. 의존성이 바뀌면
-`mise run licenses` 로 다시 만듭니다.
+Third-party components bundled into the build artifacts are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
