@@ -10,7 +10,7 @@ _.file = { path = ".env", redact = true }
 #
 # The SvelteKit build writes straight into internal/web/dist so the Go embed
 # has nothing to copy. See web/vite.config.ts (adapter pages/assets options).
-# npm ships with node, so the venue needs nothing installed beyond node itself.
+# The SPA is built once and both engines share it.
 # ---------------------------------------------------------------------------
 
 [tasks."web:install"]
@@ -21,14 +21,10 @@ run = "npm ci"
 [tasks."web:build"]
 description = "Build the SvelteKit SPA into internal/web/dist"
 dir = "web"
-run = [
-  "npm run build",
-  # adapter-static empties the output directory first, which takes the .gitkeep
-  # with it — and that file is what keeps `//go:embed all:dist` compiling on a
-  # clone where the frontend has not been built yet. Putting it back here also
-  # keeps `git status` from reporting a deletion after every build.
-  'node -e "require(\"fs\").writeFileSync(\"../internal/web/dist/.gitkeep\", \"이 파일은 지우지 마세요. //go:embed all:dist 는 매칭 파일이 0개면 컴파일 에러입니다.\")"',
-]
+# The .gitkeep that adapter-static wipes is put back by the build script itself
+# (web/scripts/keep-embed-dir.mjs), so every entry point is covered — this task,
+# a bare `npm run build`, and playwright's webServer.
+run = "npm run build"
 # Paths are relative to `dir`, so the build output is one level up.
 sources = ["src/**/*", "package.json", "vite.config.ts"]
 outputs = ["../internal/web/dist/index.html"]
@@ -51,13 +47,14 @@ run = "npm run check"
 description = "Run the API server on :8080 without embedding the UI"
 run = "go run ./cmd/skills-dashboard --port 8080"
 
-# The binaries land in bin/ and are committed. The venue has node but no Go
-# toolchain, so what cannot be rebuilt there has to arrive with the clone.
+# The binaries land in bin/, which is gitignored. While the contest venue had
+# node but no Go toolchain they were committed instead; that constraint is gone
+# and the history keeps the copies that actually ran (see README).
 #
 # The names carry node's process.platform and process.arch rather than GOOS and
 # GOARCH, so start.mjs assembles the filename it needs without translating
-# between two vocabularies. -w drops DWARF on top of -s: this is a file we
-# commit, and the debug info is a fifth of it.
+# between two vocabularies. -w drops DWARF on top of -s, which is a fifth of the
+# file.
 
 [tasks."build:windows"]
 description = "Cross-compile the committed binary for Windows"
@@ -78,9 +75,9 @@ depends = ["build:windows", "build:linux"]
 # ---------------------------------------------------------------------------
 # node
 #
-# 두 번째 엔진. 대회장에서 서명 없는 exe 가 막히면 이쪽으로 넘어간다.
-# 산출물은 server/dist/skills-dashboard.mjs 하나이고, bin/ 의 실행 파일과 같은
-# 이유로 커밋한다 — 거기서는 npm install 을 돌릴 수 없다.
+# 두 번째 엔진. 대회장에서 실행이 허용된 것이 node 였고, 이쪽이 실제로 돌아갔다.
+# 산출물은 server/dist/skills-dashboard.mjs 하나이고, 의존성이 전부 인라인되어
+# 있어 실행하는 쪽에는 npm install 이 필요 없다.
 # ---------------------------------------------------------------------------
 
 [tasks."node:install"]

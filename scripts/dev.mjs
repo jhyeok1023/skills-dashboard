@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 //
-// 개발용. Vite(:5173)와 API 바이너리(:8080)를 함께 띄운다.
+// 개발용. Vite(:5173)와 API(:8080)를 함께 띄운다.
 //
 //   npm run dev
 //
-// 대회장에서는 쓰지 않는다 — web/node_modules 가 필요하다. 프로덕션 실행은
-// start.mjs 하나로 끝난다.
+// web/node_modules 가 필요하므로 개발 중에만 쓴다. 빌드해 둔 것을 그냥
+// 띄우는 것은 start.mjs 하나로 끝난다.
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';

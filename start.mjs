@@ -6,12 +6,12 @@
 //   node start.mjs --port 9000 --verbose
 //   npm start -- --port 9000
 //
-// 대회장에는 Go 툴체인이 없고 node 만 허용된다. 그래서 여기서 하는 일은 미리
-// 만들어 커밋해 둔 것을 자식 프로세스로 띄우는 것뿐이다 — bin/ 의 Go 실행
-// 파일이거나 server/dist 의 node 번들이고, 어느 쪽인지는 findEngine 이 정한다
-// (SKILLS_DASHBOARD_ENGINE). 포트 폴백, 브라우저 자동 실행, graceful shutdown
-// 은 양쪽 다 스스로 한다 — 다시 구현하지 않는다. 런처가 더하는 것은 엔진
-// 선택과 .env 전달이다.
+// 백엔드가 두 벌이다. 여기서 하는 일은 둘 중 하나를 골라 자식 프로세스로
+// 띄우는 것뿐이다 — bin/ 의 Go 실행 파일이거나 server/dist 의 node 번들이고,
+// 어느 쪽인지는 findEngine 이 정한다(SKILLS_DASHBOARD_ENGINE). 왜 둘인지는
+// README 의 "엔진이 둘입니다". 포트 폴백, 브라우저 자동 실행, graceful
+// shutdown 은 양쪽 다 스스로 한다 — 다시 구현하지 않는다. 런처가 더하는 것은
+// 엔진 선택과 .env 전달이다.
 //
 // 의존성은 하나도 없다. node_modules 없이 갓 clone 한 저장소에서 돌아야 한다.
 
@@ -26,7 +26,7 @@ console.error(
 	`대시보드를 시작합니다. 종료하려면 Ctrl+C 를 누르세요.\n  [${engine.kind}] ${engine.label}\n`
 );
 
-// stdio 를 물려준다. 바이너리의 로그가 그대로 흐르고, 실패했을 때 stdin 을
+// stdio 를 물려준다. 엔진의 로그가 그대로 흐르고, 실패했을 때 stdin 을
 // 읽어 창을 붙잡는 reportFatal 경로도 살아 있다. 파이프로 바꾸면 그게 깨진다.
 const child = spawn(engine.command, args, { stdio: 'inherit' });
 
@@ -51,7 +51,7 @@ let stopping = false;
 
 function stop() {
 	// Windows 콘솔은 Ctrl+C 를 프로세스 그룹 전체에 이미 보냈다. 여기서 kill
-	// 하면 TerminateProcess 가 되어 바이너리의 10초 graceful shutdown 을
+	// 하면 TerminateProcess 가 되어 엔진의 10초 graceful shutdown 을
 	// 빼앗는다. 기다리는 쪽이 옳다.
 	if (process.platform === 'win32') return;
 	if (stopping) {

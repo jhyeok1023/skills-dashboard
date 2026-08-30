@@ -1,8 +1,8 @@
 // 런처가 공유하는 세 가지 판단: 어느 엔진으로 띄울지, 어느 실행 파일을 띄울지,
 // .env 를 어떻게 넘길지.
 //
-// start.mjs 와 dev.mjs 가 같은 답을 내야 한다. 갈라지면 개발 중에는 되던 것이
-// 대회장에서 안 되고, 그 차이가 어디서 왔는지 보이지 않는다.
+// start.mjs 와 dev.mjs 가 같은 답을 내야 한다. 갈라지면 한쪽에서는 되던 것이
+// 다른 쪽에서 안 되고, 그 차이가 어디서 왔는지 보이지 않는다.
 //
 // 표준 라이브러리만 쓴다. 갓 clone 한 저장소에는 node_modules 가 없다.
 
@@ -17,14 +17,14 @@ const exeSuffix = process.platform === 'win32' ? '.exe' : '';
 // 탐색 순서에 의미가 있다.
 //
 //   1. SKILLS_DASHBOARD_BIN — 다른 빌드를 임시로 물려 볼 때의 탈출구.
-//   2. bin/<platform>-<arch> — 커밋해서 대회장까지 가져가는 것. clone 하면 이게
-//      잡힌다. 이름은 GOOS/GOARCH 가 아니라 node 의 process.platform/arch 를
-//      따른다. 런처가 문자열을 변환하지 않고 그대로 조립하게 하려는 것이다.
+//   2. bin/<platform>-<arch> — `mise run build` 의 산출물. 이름은 GOOS/GOARCH 가
+//      아니라 node 의 process.platform/arch 를 따른다. 런처가 두 어휘를 번역하지
+//      않고 그대로 조립하게 하려는 것이다.
 //   3. bin/skills-dashboard — 손으로 복사해 둔 경우.
-//   4. dist/ — mise 로컬 빌드 산출물. .gitignore 대상이라 개발 중에만 있다.
+//   4. dist/ — 다른 자리에 빌드해 둔 경우의 여지.
 //
-// bin/ 이 dist/ 보다 먼저다. 로컬에서 도는 것과 대회장에서 도는 것을 같게
-// 하려는 것이고, 방금 만든 빌드를 쓰고 싶으면 1번으로 뒤집는다.
+// bin/ 이 dist/ 보다 먼저인 것은 `mise run build` 가 쓰는 곳이 bin/ 이기
+// 때문이다. 방금 만든 다른 빌드를 강제하려면 1번으로 뒤집는다.
 function candidatePaths() {
 	return [
 		process.env.SKILLS_DASHBOARD_BIN,
@@ -47,12 +47,14 @@ export function findBinary() {
 				'다음을 확인했습니다:',
 				...tried.map((p) => `  ${p}`),
 				'',
-				'Go 툴체인이 있는 기계라면 아래로 다시 만드세요.',
+				'Go 엔진은 아래로 만듭니다. Go 툴체인이 필요합니다.',
 				'',
 				'  mise run build',
 				'',
-				'없다면 bin/ 폴더가 clone 에 함께 내려왔는지 보세요. git-lfs 를 쓰지',
-				'않으므로 clone 만으로 실행 파일이 들어 있어야 정상입니다.',
+				'Go 툴체인이 없다면 node 엔진을 쓰세요. node 만 있으면 됩니다.',
+				'',
+				'  npm --prefix server ci',
+				'  mise run node:build',
 				''
 			].join('\n')
 		);
@@ -62,7 +64,7 @@ export function findBinary() {
 	return found;
 }
 
-/** 순수 node 서버 번들. 있으면 exe 없이도 대시보드가 뜬다. */
+/** 순수 node 서버 번들. 있으면 실행 파일 없이도 대시보드가 뜬다. */
 export const nodeBundle = join(repoRoot, 'server', 'dist', 'skills-dashboard.mjs');
 
 const engineKinds = ['node', 'binary'];
@@ -70,17 +72,18 @@ const engineKinds = ['node', 'binary'];
 /**
  * findEngine 은 무엇을 띄울지 정한다.
  *
- * 트랙이 둘이다. `binary` 는 bin/ 에 커밋해 둔 Go 실행 파일이고, `node` 는
- * server/dist 의 번들이다. 대회장에서 서명 없는 exe 가 Defender 나
- * SmartScreen 에 막히면 손댈 수 있는 것이 없으므로, 그때 넘어갈 곳을 미리
- * 만들어 둔다. 명령은 양쪽 다 `node start.mjs` 하나로 유지된다.
+ * 트랙이 둘이다. `binary` 는 Go 백엔드를 빌드한 bin/ 의 실행 파일이고, `node`
+ * 는 TypeScript 백엔드를 esbuild 로 묶은 server/dist 의 번들이다. 대회장에서
+ * 실행이 허용된 목록에 Go 가 없고 node 는 있어서, 허용된 런타임 위에서 도는
+ * 두 번째 트랙을 만들었다. 명령은 양쪽 다 `node start.mjs` 하나로 유지된다.
+ * 왜 둘인지는 README 의 "엔진이 둘입니다".
  *
  *   SKILLS_DASHBOARD_ENGINE=node    번들을 띄운다
- *   SKILLS_DASHBOARD_ENGINE=binary  exe 를 띄운다
+ *   SKILLS_DASHBOARD_ENGINE=binary  실행 파일을 띄운다
  *   (지정하지 않으면) 번들이 있으면 node, 없으면 binary
  *
- * 기본값이 번들 쪽인 이유는 하나다. 번들이 있다는 것은 이 저장소가 node 트랙을
- * 갖췄다는 뜻이고, 그렇다면 대회장에서 실제로 돌릴 것도 그쪽이다.
+ * 기본값이 번들 쪽인 이유는 하나다. 번들을 만들어 두었다는 것은 이 저장소가
+ * node 트랙을 갖췄다는 뜻이고, 그렇다면 실제로 돌릴 것도 그쪽이다.
  */
 export function findEngine() {
 	const requested = process.env.SKILLS_DASHBOARD_ENGINE?.trim();
@@ -107,12 +110,13 @@ export function findEngine() {
 					'',
 					`  ${nodeBundle}`,
 					'',
-					'아래로 만드세요. node 가 있는 기계라면 Go 툴체인이 없어도 됩니다.',
+					'아래로 만드세요. Go 툴체인이 없어도 됩니다.',
 					'',
 					'  npm --prefix server ci',
 					'  mise run node:build',
 					'',
-					'지금 당장 띄우려면 SKILLS_DASHBOARD_ENGINE=binary 로 exe 를 쓰세요.',
+					'Go 툴체인이 있다면 `mise run build` 로 만든 뒤',
+					'SKILLS_DASHBOARD_ENGINE=binary 로 Go 엔진을 쓸 수도 있습니다.',
 					''
 				].join('\n')
 			);
@@ -128,8 +132,8 @@ export function findEngine() {
 }
 
 
-// git 은 실행 비트를 보존하지만 zip 이나 USB 를 거치면 사라진다. Windows 에는
-// 해당 개념이 없다.
+// 빌드 산출물을 zip 이나 USB 로 옮기면 실행 비트가 사라진다. Windows 에는 해당
+// 개념이 없다.
 function ensureExecutable(bin) {
 	if (process.platform === 'win32') return;
 	try {
@@ -146,15 +150,15 @@ function ensureExecutable(bin) {
 }
 
 /**
- * withEnvFlag 는 저장소 루트의 .env 를 바이너리에 명시적으로 넘긴다.
+ * withEnvFlag 는 저장소 루트의 .env 를 엔진에 명시적으로 넘긴다.
  *
- * 바이너리는 자기 옆의 .env 를 먼저, 없으면 ~/.skills-dashboard/.env 를 본다.
+ * 엔진은 자기 옆의 .env 를 먼저, 없으면 ~/.skills-dashboard/.env 를 본다.
  * 현재 작업 디렉터리는 일부러 보지 않는다 — 어디서 실행했느냐로 읽는 키가
  * 달라지지 않게 하려는 설계다(README 참고). 그래서 bin/ 안의 실행 파일을 그냥
  * 띄우면 저장소 루트의 .env 가 무시되고, 화면에는 자격증명 오류만 뜬다.
  *
- * 없는 경로를 --env 로 넘기면 바이너리가 즉시 죽는다(오타를 삼키지 않겠다는
- * 의도적 동작). 그래서 파일이 있을 때만 넘기고, 없으면 바이너리 자신의 탐색
+ * 없는 경로를 --env 로 넘기면 엔진이 즉시 죽는다(오타를 삼키지 않겠다는
+ * 의도적 동작). 그래서 파일이 있을 때만 넘기고, 없으면 엔진 자신의 탐색
  * 순서에 맡긴 뒤 무엇을 해야 하는지 알려 준다.
  */
 export function withEnvFlag(args) {
