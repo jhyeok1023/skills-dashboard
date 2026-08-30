@@ -9,7 +9,14 @@
 // 넣고 그 결과물을 커밋한다. 실행에 필요한 것은 파일 하나와 node 뿐이다.
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+	copyFileSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	statSync,
+	writeFileSync
+} from 'node:fs';
 import { dirname, join, posix, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -138,7 +145,7 @@ if (assets.length === 0) {
 
 // minify 하지 않는다. 이 파일은 커밋되므로 줄 구조가 남아야 git 이 델타를
 // 만들 수 있고, 대회장에서 스택 트레이스를 읽을 일이 생기면 그게 전부다.
-await build({
+const result = await build({
 	entryPoints: [join(serverDir, 'src', 'main.ts')],
 	outfile: outFile,
 	bundle: true,
@@ -149,6 +156,9 @@ await build({
 	keepNames: true,
 	sourcemap: false,
 	logLevel: 'info',
+	// scripts/licenses.mjs 가 이것을 읽어 번들에 실제로 들어간
+	// node_modules 패키지를 알아낸다. 번들 내용에는 영향이 없다.
+	metafile: true,
 	// CJS 의존성 몇 개가 런타임에 require 를 부른다(@smithy 압축 미들웨어가
 	// node:zlib 을 그렇게 가져온다). ESM 번들에는 require 가 없으므로 esbuild 가
 	// "Dynamic require is not supported" 를 던지는 shim 을 심는데, 그 shim 은
@@ -166,6 +176,18 @@ await build({
 const bytes = statSync(outFile).size;
 
 mkdirSync(dirname(outFile), { recursive: true });
+writeFileSync(join(serverDir, 'dist', 'meta.json'), JSON.stringify(result.metafile, null, '\t'));
+
+// 번들에는 의존성이 전부 인라인되어 있다. 이 파일만 따로 건네받은 사람도
+// 고지를 볼 수 있도록 라이선스와 서드파티 고지를 산출물 옆에 함께 둔다.
+for (const name of ['LICENSE', 'THIRD_PARTY_NOTICES.md']) {
+	try {
+		copyFileSync(join(repoRoot, name), join(serverDir, 'dist', name));
+	} catch {
+		console.error(`[경고] ${name} 을 dist 로 복사하지 못했습니다. mise run licenses 를 먼저 돌리세요.`);
+	}
+}
+
 writeFileSync(
 	join(serverDir, 'dist', 'BUILD.txt'),
 	[

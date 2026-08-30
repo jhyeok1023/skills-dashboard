@@ -59,13 +59,19 @@ run = "go run ./cmd/skills-dashboard --port 8080"
 [tasks."build:windows"]
 description = "Cross-compile the committed binary for Windows"
 depends = ["web:build"]
-run = 'go build -trimpath -ldflags="-s -w" -o bin/skills-dashboard-win32-x64.exe ./cmd/skills-dashboard'
+run = [
+  'go build -trimpath -ldflags="-s -w" -o bin/skills-dashboard-win32-x64.exe ./cmd/skills-dashboard',
+  'cp LICENSE THIRD_PARTY_NOTICES.md bin/',
+]
 env = { GOOS = "windows", GOARCH = "amd64", CGO_ENABLED = "0" }
 
 [tasks."build:linux"]
 description = "Cross-compile the committed binary for Linux"
 depends = ["web:build"]
-run = 'go build -trimpath -ldflags="-s -w" -o bin/skills-dashboard-linux-x64 ./cmd/skills-dashboard'
+run = [
+  'go build -trimpath -ldflags="-s -w" -o bin/skills-dashboard-linux-x64 ./cmd/skills-dashboard',
+  'cp LICENSE THIRD_PARTY_NOTICES.md bin/',
+]
 env = { GOOS = "linux", GOARCH = "amd64", CGO_ENABLED = "0" }
 
 [tasks.build]
@@ -105,6 +111,25 @@ run = "node server/dist/skills-dashboard.mjs --port 8080 --open=false"
 [tasks.parity]
 description = "Compare the two engines' answers endpoint by endpoint"
 run = "node scripts/parity.mjs"
+
+# ---------------------------------------------------------------------------
+# licenses
+#
+# 두 엔진은 서드파티를 산출물 안에 넣는다 — Go 는 aws-sdk-go-v2 를 정적 링크
+# 하고, esbuild 는 의존성을 전부 인라인하며, SPA 는 양쪽에 임베드된다. Apache-2.0
+# 과 MIT 은 그렇게 배포할 때 라이선스 사본과 저작권 고지를 함께 주라고 요구한다.
+#
+# THIRD_PARTY_NOTICES.md 는 생성물이지만 커밋한다. 아카이브 저장소라 의존성이
+# 더 바뀌지 않고, 커밋해 두어야 소스만 받은 사람도 고지를 볼 수 있다.
+#
+# web:build / node:build 를 depends 로 걸지 않는다. 걸면 Go 바이너리 하나
+# 빌드하는 데 server/ 의 npm ci 까지 강요된다. 대신 입력이 없으면 어느 명령을
+# 먼저 돌려야 하는지 알려주고 실패한다.
+# ---------------------------------------------------------------------------
+
+[tasks.licenses]
+description = "THIRD_PARTY_NOTICES.md 를 두 엔진의 빌드 산출물에서 다시 만든다"
+run = "node scripts/licenses.mjs"
 
 # ---------------------------------------------------------------------------
 # quality

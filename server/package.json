@@ -2,6 +2,7 @@
 	"name": "@skills-dashboard/server",
 	"version": "0.0.0",
 	"private": true,
+	"license": "BSD-3-Clause",
 	"type": "module",
 	"description": "Go 백엔드의 Node 이식 — 대회장에서 exe 가 막혔을 때의 두 번째 트랙",
 	"scripts": {

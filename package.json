@@ -2,6 +2,7 @@
 	"name": "skills-dashboard",
 	"version": "0.0.0",
 	"private": true,
+	"license": "BSD-3-Clause",
 	"type": "module",
 	"description": "EKS 워크로드 모니터링 대시보드 — node 로 실행하는 런처",
 	"scripts": {

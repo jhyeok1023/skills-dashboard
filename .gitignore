@@ -10,6 +10,9 @@
 /internal/web/dist/*
 !/internal/web/dist/.gitkeep
 
+# scripts/licenses.mjs 가 읽는 중간 산출물. server/dist/meta.json 은 위에서 덮인다.
+/web/.licenses/
+
 # node. 루트 package.json 은 의존성이 없으므로 여기 node_modules 가 생길 일이
 # 없지만, 실수로 생겼을 때 커밋되지는 않게 한다.
 /node_modules/

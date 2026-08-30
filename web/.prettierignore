@@ -10,3 +10,6 @@ bun.lockb
 /build/
 /test-results/
 /playwright-report/
+
+# scripts/licenses.mjs 가 읽는 빌드 산출물
+.licenses

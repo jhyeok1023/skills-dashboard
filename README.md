@@ -1,6 +1,6 @@
 # skills-dashboard
 
-> 2026년 전국기능경기대회 3과제로 만든 대시보드입니다. 대회가 끝나 **보관 상태**이고, 기능 추가는 하지 않습니다.
+> 2026년 전국기능경기대회 3과제에 사용할 목적으로 만든 대시보드입니다.
 
 EKS 워크로드를 로컬에서 관찰하는 대시보드입니다. 팟 로그, WAF 로그, 타겟 그룹 지표, 팟·노드 리소스와 개수, 팟 상태, RDS Proxy 커넥션을 **하나의 시간축** 위에 모읍니다.
 
@@ -85,6 +85,9 @@ git show 8eef79f:bin/skills-dashboard-linux-x64 > skills-dashboard   # 12,939,42
 git show 8eef79f:server/dist/skills-dashboard.mjs > bundle.mjs
 ```
 
+이 둘은 서드파티 고지가 갖춰지기 전의 산출물입니다. 꺼내서 남에게 넘길 일이 있다면
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) 와 [`LICENSE`](LICENSE) 를 함께 넘기세요.
+
 ## 설계
 
 이 저장소는 재작성입니다. 이전 구현이 겪은 세 가지 문제가 아키텍처를 결정했습니다. 각각의 맥락과 기각된 대안은 [`NOTES.md`](NOTES.md) 의 결정 로그에 있습니다.
@@ -107,6 +110,7 @@ mise run lint           # go vet + prettier + eslint
 mise run build          # bin/skills-dashboard-{win32-x64.exe,linux-x64}
 mise run node:build     # server/dist/skills-dashboard.mjs
 mise run parity         # 두 엔진의 응답을 엔드포인트마다 대조
+mise run licenses       # THIRD_PARTY_NOTICES.md 재생성 (두 엔진을 먼저 빌드)
 npm run dev             # :5173 (UI) + :8080 (API), /api 를 프록시
 ```
 
@@ -149,6 +153,20 @@ node 쪽에는 그에 해당하는 단위 테스트가 없습니다. 대신 `web
 
 `docs/screenshots/` 의 그림은 e2e 픽스처로 찍은 것이라 AWS 계정이 필요 없습니다. 다시 찍으려면 `SHOTS=1 npm --prefix web run test:e2e -- shots` — 리눅스에서는 폰트를 먼저 잡아야 합니다(`web/e2e/shots.e2e.ts` 주석 참고).
 
-## 라이선스
+## License
 
-BSD 3-Clause. `LICENSE` 참고.
+This project is licensed under the [BSD 3-Clause License](LICENSE).
+
+### 서드파티
+
+두 엔진은 서드파티를 산출물 **안에** 넣습니다. Go 는 `aws-sdk-go-v2` 를 정적 링크하고,
+esbuild 는 의존성을 전부 인라인하며, SPA 는 양쪽에 임베드됩니다. Apache-2.0 과 MIT 은
+그렇게 배포할 때 라이선스 사본과 저작권 고지를 함께 주라고 요구합니다.
+
+산출물에 실제로 들어가는 것들의 고지는 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)
+에 있습니다. **`bin/` 이나 `server/dist/` 의 산출물을 남에게 넘길 때는 `LICENSE` 와 이 파일을
+함께 넘기세요** — 빌드가 두 파일을 산출물 옆에 복사해 둡니다.
+
+목록은 선언된 의존성이 아니라 빌드가 남긴 사실에서 옵니다. Go 는 컴파일 그래프,
+node 는 esbuild metafile, SPA 는 rolldown 이 번들한 모듈입니다. 의존성이 바뀌면
+`mise run licenses` 로 다시 만듭니다.
